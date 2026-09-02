@@ -1,0 +1,135 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/dingdinglz/pi-worktree/main/schema/worktree.schema.json",
+  "title": "pi-worktree configuration",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version"],
+  "properties": {
+    "$schema": { "type": "string", "minLength": 1, "maxLength": 4096, "pattern": "^[^\\u0000]*$" },
+    "version": { "const": 1 },
+    "locale": { "enum": ["auto", "en", "zh-CN"] },
+    "worktreeRoot": {
+      "type": "string",
+      "maxLength": 4096,
+      "pattern": "^(?:/|~/)[^\\u0000]*$",
+      "description": "Absolute path or a path beginning with ~/"
+    },
+    "branchPrefix": { "type": "string", "maxLength": 512, "pattern": "^(?!.*\\.\\.)[^\\u0000]*$", "default": "wt/" },
+    "launcher": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "mode": { "enum": ["auto", "none", "custom"] },
+        "shell": { "type": "string", "minLength": 1, "maxLength": 4096, "pattern": "^[^\\u0000]*$" },
+        "command": {
+          "type": "array",
+          "maxItems": 256,
+          "prefixItems": [{
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 32768,
+            "allOf": [{ "pattern": "\\S" }, { "pattern": "^[^\\u0000]*$" }]
+          }],
+          "items": { "type": "string", "maxLength": 32768, "pattern": "^[^\\u0000]*$" },
+          "description": "argv template. Supports {path}, {root}, {branch}, {sourcePath}, {sourceBranch}, {task}, {pi}, and the standalone {piArgs} token. Not allowed in project config."
+        }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "mode": { "const": "custom" } }, "required": ["mode"] },
+          "then": {
+            "required": ["command"],
+            "properties": {
+              "command": {
+                "minItems": 1,
+                "allOf": [
+                  { "contains": { "pattern": "\\{pi\\}" } },
+                  { "contains": { "const": "{piArgs}" } }
+                ]
+              }
+            }
+          }
+        }
+      ]
+    },
+    "defaults": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "draftPr": { "type": "boolean", "default": false },
+        "launch": { "type": "boolean", "default": true },
+        "missingPostCreate": { "enum": ["ask", "skip"], "default": "ask" },
+        "historyRetentionDays": { "type": "integer", "minimum": 0, "maximum": 365000, "default": 30 },
+        "logRetentionDays": { "type": "integer", "minimum": 0, "maximum": 365000, "default": 7 }
+      }
+    },
+    "pr": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "pushRemote": { "type": "string", "minLength": 1, "maxLength": 1024, "pattern": "^[^\\u0000]*$" },
+        "baseRepo": { "type": "string", "minLength": 1, "maxLength": 2048, "pattern": "^[^\\u0000]*$", "description": "[HOST/]OWNER/REPO" }
+      }
+    },
+    "hooks": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "postCreate": { "$ref": "#/$defs/hookSequence" },
+        "preFinish": { "$ref": "#/$defs/hookSequence" },
+        "prePr": { "$ref": "#/$defs/hookSequence" },
+        "preMerge": { "$ref": "#/$defs/hookSequence" }
+      }
+    }
+  },
+  "$defs": {
+    "hookStep": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["command"],
+      "properties": {
+        "command": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 8192,
+          "allOf": [{ "pattern": "\\S" }, { "pattern": "^[^\\u0000]*$" }]
+        },
+        "args": { "type": "array", "maxItems": 256, "items": { "type": "string", "maxLength": 32768, "pattern": "^[^\\u0000]*$" } },
+        "timeoutMs": { "type": "integer", "minimum": 1, "maximum": 86400000, "default": 900000 },
+        "env": {
+          "type": "object",
+          "propertyNames": {
+            "allOf": [
+              { "pattern": "^[A-Za-z_][A-Za-z0-9_]*$" },
+              { "not": { "pattern": "^PI_WT_" } }
+            ]
+          },
+          "maxProperties": 256,
+          "additionalProperties": { "type": "string", "maxLength": 32768, "pattern": "^[^\\u0000]*$" }
+        },
+        "shell": { "type": "boolean", "default": false }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "shell": { "const": true } }, "required": ["shell"] },
+          "then": { "properties": { "args": { "maxItems": 0 } } }
+        }
+      ]
+    },
+    "hookSequence": {
+      "oneOf": [
+        { "type": "array", "maxItems": 1024, "items": { "$ref": "#/$defs/hookStep" } },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["steps"],
+          "properties": {
+            "merge": { "enum": ["replace", "append", "prepend"], "default": "replace" },
+            "steps": { "type": "array", "maxItems": 1024, "items": { "$ref": "#/$defs/hookStep" } }
+          }
+        }
+      ]
+    }
+  }
+}

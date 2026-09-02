@@ -1,0 +1,60 @@
+{
+  "name": "@dingdinglz/pi-worktree",
+  "version": "0.1.0",
+  "description": "Safe, AI-assisted Git worktree workflows for the pi coding agent",
+  "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/dingdinglz/pi-worktree.git"
+  },
+  "homepage": "https://github.com/dingdinglz/pi-worktree#readme",
+  "bugs": {
+    "url": "https://github.com/dingdinglz/pi-worktree/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "git",
+    "worktree",
+    "github"
+  ],
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "files": [
+    "src",
+    "schema",
+    "README.md",
+    "README.zh-CN.md",
+    "CHANGELOG.md",
+    "LICENSE"
+  ],
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run --testTimeout=15000",
+    "test:watch": "vitest",
+    "check": "npm run typecheck && npm test"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "typebox": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-ai": "^0.84.4",
+    "@earendil-works/pi-coding-agent": "^0.84.4",
+    "@earendil-works/pi-tui": "^0.84.4",
+    "@types/node": "^22.19.19",
+    "typebox": "^1.3.7",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.9"
+  }
+}

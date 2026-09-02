@@ -1,0 +1,25 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run check
+      - run: node -e 'JSON.parse(require("node:fs").readFileSync("schema/worktree.schema.json", "utf8"))'
+      - run: npm pack --dry-run
