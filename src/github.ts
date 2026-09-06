@@ -12,6 +12,7 @@ import {
   remoteBranchSha,
   remoteIdentity,
   remoteNames,
+  parseRemoteUrl,
 } from "./git.ts";
 import { redactSecrets, shellQuote } from "./util.ts";
 
@@ -157,6 +158,7 @@ export async function createPrPlan(options: {
   }
 
   const push = await choosePushRemote(options.pi, options.record, options.config, options.select);
+  await assertPushDestination(options.pi, options.record.path, push.name, push.identity);
   if (push.identity.host !== baseIdentity.host) {
     throw new Error(`Push remote host ${push.identity.host} does not match PR host ${baseIdentity.host}`);
   }
@@ -183,7 +185,7 @@ function isPullRequestInfo(item: unknown): item is PullRequestInfo {
     typeof value.headRefOid === "string" && /^[0-9a-f]{40,64}$/i.test(value.headRefOid) &&
     typeof value.title === "string" && value.title.length <= 256 &&
     typeof value.body === "string" && Buffer.byteLength(value.body, "utf8") <= 1_048_576 &&
-    typeof value.isDraft === "boolean" && repository !== undefined && !Array.isArray(repository) &&
+    typeof value.isDraft === "boolean" && repository !== null && typeof repository === "object" && !Array.isArray(repository) &&
     typeof repository.nameWithOwner === "string" && /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository.nameWithOwner);
 }
 
@@ -220,6 +222,17 @@ function prInfoMatchesPlan(info: PullRequestInfo, plan: PrPlan): boolean {
     Boolean(expectedHeadRepo) && info.headRepository?.nameWithOwner?.toLowerCase() === expectedHeadRepo;
 }
 
+async function assertPushDestination(pi: ExtensionAPI, cwd: string, remote: string, identity: RemoteIdentity): Promise<void> {
+  const output = await gitOk(pi, cwd, ["remote", "get-url", "--push", "--all", "--", remote], `Unable to inspect push URLs for ${remote}`);
+  const urls = output.split("\n").filter(Boolean);
+  const push = urls.length === 1 ? parseRemoteUrl(remote, urls[0]) : undefined;
+  // Git push honors pushurl (and may push to several URLs); fetch/ls-remote do not.
+  // Require one repository for both directions so verification covers publication.
+  if (!push || push.repoSpec.toLowerCase() !== identity.repoSpec.toLowerCase()) {
+    throw new Error(`Push remote ${remote} must have one push URL matching its fetch repository ${identity.repoSpec}; configure a separate remote for a different destination`);
+  }
+}
+
 export async function validatePrPlanRemotes(
   pi: ExtensionAPI,
   worktreePath: string,
@@ -234,6 +247,7 @@ export async function validatePrPlanRemotes(
       push.owner.toLowerCase() !== plan.headOwner?.toLowerCase()) {
     throw new Error(`Push remote ${plan.pushRemote} no longer matches the approved repository ${plan.pushRepo}`);
   }
+  await assertPushDestination(pi, worktreePath, plan.pushRemote, push);
   if (!base || base.host !== plan.host || base.repoSpec !== plan.baseRepo) {
     throw new Error(`Base remote ${plan.baseRemote} no longer matches the approved repository ${plan.baseRepo}`);
   }
@@ -285,18 +299,20 @@ export async function writeApprovedPrBody(
   return path;
 }
 
-export function prCommands(plan: PrPlan): {
+export function prCommands(plan: PrPlan, workHead: string): {
   push: string;
   create?: string;
   reopen?: string;
   edit?: string;
   draftStatus?: string;
 } {
+  if (!/^[0-9a-f]{40,64}$/i.test(workHead)) throw new Error("Publication requires an approved commit ID");
   const remoteRef = `refs/heads/${plan.headBranch}`;
   const ghCommand = (args: string[]) => `GH_PROMPT_DISABLED=1 ${args.map(shellQuote).join(" ")}`;
-  const pushArgs = ["git", "-c", "credential.interactive=never", "push", "--set-upstream"];
+  const pushArgs = ["git", "-c", "credential.interactive=never", "push"];
   if (plan.forceLeaseSha) pushArgs.push(`--force-with-lease=${remoteRef}:${plan.forceLeaseSha}`);
-  pushArgs.push("--", plan.pushRemote, `HEAD:${remoteRef}`);
+  // Force revision parsing so a branch/tag named exactly workHead cannot shadow the approved commit.
+  pushArgs.push("--", plan.pushRemote, `${workHead}^{commit}:${remoteRef}`);
   const result: { push: string; create?: string; reopen?: string; edit?: string; draftStatus?: string } = {
     push: `GIT_TERMINAL_PROMPT=0 GCM_INTERACTIVE=Never ${pushArgs.map(shellQuote).join(" ")}`,
   };

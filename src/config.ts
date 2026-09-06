@@ -123,7 +123,7 @@ function validateHookSequence(value: unknown, path: string, file?: string): asse
   } else {
     assertObject(value, path, file);
     assertKnownKeys(value, new Set(["merge", "steps"]), path, file);
-    if (value.merge !== undefined && !["replace", "append", "prepend"].includes(String(value.merge))) {
+    if (value.merge !== undefined && (typeof value.merge !== "string" || !["replace", "append", "prepend"].includes(value.merge))) {
       throw new ConfigValidationError("merge must be replace, append, or prepend", file, `${path}/merge`);
     }
     steps = value.steps;
@@ -142,7 +142,7 @@ export function validateConfig(value: unknown, file?: string, scope?: ConfigLaye
   if (typeof value.$schema === "string" && (value.$schema.length === 0 || value.$schema.length > 4_096 || value.$schema.includes("\0"))) {
     throw new ConfigValidationError("$schema must be a non-empty NUL-free string of at most 4096 characters", file, "/$schema");
   }
-  if (value.locale !== undefined && !["auto", "en", "zh-CN"].includes(String(value.locale))) {
+  if (value.locale !== undefined && (typeof value.locale !== "string" || !["auto", "en", "zh-CN"].includes(value.locale))) {
     throw new ConfigValidationError("locale must be auto, en, or zh-CN", file, "/locale");
   }
   assertOptionalString(value.worktreeRoot, "/worktreeRoot", file);
@@ -163,7 +163,7 @@ export function validateConfig(value: unknown, file?: string, scope?: ConfigLaye
     }
     assertObject(value.launcher, "/launcher", file);
     assertKnownKeys(value.launcher, new Set(["mode", "shell", "command"]), "/launcher", file);
-    if (value.launcher.mode !== undefined && !["auto", "none", "custom"].includes(String(value.launcher.mode))) {
+    if (value.launcher.mode !== undefined && (typeof value.launcher.mode !== "string" || !["auto", "none", "custom"].includes(value.launcher.mode))) {
       throw new ConfigValidationError("mode must be auto, none, or custom", file, "/launcher/mode");
     }
     assertOptionalString(value.launcher.shell, "/launcher/shell", file);
@@ -216,7 +216,7 @@ export function validateConfig(value: unknown, file?: string, scope?: ConfigLaye
     }
     if (
       value.defaults.missingPostCreate !== undefined &&
-      !["ask", "skip"].includes(String(value.defaults.missingPostCreate))
+      (typeof value.defaults.missingPostCreate !== "string" || !["ask", "skip"].includes(value.defaults.missingPostCreate))
     ) {
       throw new ConfigValidationError("must be ask or skip", file, "/defaults/missingPostCreate");
     }

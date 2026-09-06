@@ -75,9 +75,8 @@ function replacePlaceholders(value: string, context: LauncherContext, invocation
     "{task}": context.record.task,
     "{pi}": invocation.command,
   };
-  let result = value;
-  for (const [placeholder, replacement] of Object.entries(replacements)) result = result.replaceAll(placeholder, replacement);
-  return result;
+  // A callback keeps dollar sequences literal and never expands placeholders inside values.
+  return value.replace(/\{[^{}]+\}/g, (placeholder) => replacements[placeholder] ?? placeholder);
 }
 
 function customPlan(

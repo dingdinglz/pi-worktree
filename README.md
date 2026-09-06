@@ -52,7 +52,7 @@ When the task is ready, from the managed worktree:
 1. The extension validates and synchronizes the recorded source checkout.
 2. The current agent reviews, stages, commits, and rebases—but cannot publish yet.
 3. `worktree_prepare` runs configured quality gates and asks you to approve commits and PR content.
-4. The agent uses explicit, approved push and `gh pr create` commands.
+4. The agent uses explicit, approved push and `gh pr create` commands. Pushes are pinned to the reviewed commit SHA, not a potentially changed `HEAD`.
 5. `worktree_finalize` verifies the remote SHA, head/base refs, title/body, and draft state.
 6. After a final confirmation, pi exits and a helper removes the worktree. The local and remote PR branches remain.
 
@@ -64,7 +64,9 @@ When the task is ready, from the managed worktree:
 4. It never pushes the source branch automatically.
 5. After confirmation, the worktree is removed and the integrated local work branch is deleted with `git branch -d`.
 
-If the source branch changes during the workflow, publication/integration stops and the agent must rebase again. No merge commit is silently introduced.
+If the source branch changes during the workflow, publication/integration stops and the agent must rebase again. No merge commit is silently introduced. An interrupted rebase can be continued with `/wt finish <pr|merge> --resume`.
+
+The selected push remote must have a single push URL pointing to the same repository as its fetch URL. For forks with a different destination, configure a separate remote; mismatched or multiple push destinations are rejected before publication.
 
 ## Commands
 

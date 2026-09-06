@@ -97,6 +97,15 @@ describe("configuration", () => {
     await expect(saveConfig(paths.project, { version: 1 }, "project")).rejects.toThrow(/symlink-diverted/);
   });
 
+  it.each([
+    { locale: ["en"] },
+    { launcher: { mode: ["auto"] } },
+    { defaults: { missingPostCreate: ["skip"] } },
+    { hooks: { preFinish: { merge: ["append"], steps: [] } } },
+  ])("rejects non-string enum values: %j", (value) => {
+    expect(() => validateConfig({ version: 1, ...value })).toThrow(ConfigValidationError);
+  });
+
   it("strictly rejects unknown keys and project launchers", () => {
     expect(() => validateConfig({ version: 1, surprise: true })).toThrow(ConfigValidationError);
     expect(() => validateConfig({ version: 1, launcher: { mode: "auto" } }, "project.json", "project")).toThrow(

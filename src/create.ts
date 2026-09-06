@@ -13,6 +13,7 @@ import {
   branchExists,
   currentHead,
   discoverRepo,
+  fastForwardCheckout,
   git,
   gitOk,
   gitOperationInProgress,
@@ -27,7 +28,7 @@ import {
 import { assertHookCommandsAvailable, describeHookStep, runHookSteps } from "./hooks.ts";
 import { createTranslator, resolveLocale } from "./i18n.ts";
 import { buildLaunchPlan, executeLaunchPlan, manualLaunchCommand } from "./launcher.ts";
-import type { EffectiveConfig, HookRunResult, HookStep, ManagedWorktree, WorktreeConfig } from "./types.ts";
+import type { EffectiveConfig, HookRunResult, HookStep, ManagedWorktree, RepoInfo, WorktreeConfig } from "./types.ts";
 import type { Registry } from "./registry.ts";
 import { withCancellableLoader } from "./ui.ts";
 import {
@@ -143,10 +144,10 @@ async function resolveMissingHook(
 async function syncSourceForCreate(
   pi: ExtensionAPI,
   ctx: ExtensionCommandContext,
-  root: string,
-  upstream: { remote: string; short: string; branch: string } | undefined,
+  repo: RepoInfo,
   zh = false,
 ): Promise<void> {
+  const { root, upstream } = repo;
   if (!upstream) return;
   const fetch = await git(pi, root, ["fetch", "--", upstream.remote], { timeout: 120_000 });
   if (fetch.code !== 0) {
@@ -156,7 +157,18 @@ async function syncSourceForCreate(
     );
     return;
   }
-  const relation = await aheadBehind(pi, root, "HEAD", `refs/remotes/${upstream.remote}/${upstream.branch}`);
+  const upstreamRevision = await git(pi, root, ["rev-parse", "--verify", "--quiet", `refs/remotes/${upstream.remote}/${upstream.branch}^{commit}`]);
+  if (upstreamRevision.code !== 0) {
+    ctx.ui.notify(
+      zh
+        ? `Upstream ${redactSecrets(upstream.short)} 不可用，将使用当前本地 HEAD。`
+        : `Upstream ${redactSecrets(upstream.short)} is unavailable; using the current local HEAD.`,
+      "warning",
+    );
+    return;
+  }
+  const upstreamHead = upstreamRevision.stdout.trim();
+  const relation = await aheadBehind(pi, root, repo.head, upstreamHead);
   if (!relation || relation.behind === 0) return;
   const choices = relation.ahead === 0
     ? (zh ? ["先快进来源分支", "使用当前本地 HEAD", "取消"] : ["Fast-forward source branch first", "Use current local HEAD", "Cancel"])
@@ -169,7 +181,7 @@ async function syncSourceForCreate(
   );
   if (!selected || selected === choices.at(-1)) throw new Error(zh ? "已取消" : "Cancelled");
   if (selected === choices[0] && relation.ahead === 0) {
-    await gitOk(pi, root, ["merge", "--ff-only", `refs/remotes/${upstream.remote}/${upstream.branch}`], "Unable to fast-forward source branch");
+    await fastForwardCheckout(pi, repo, upstreamHead);
   }
 }
 
@@ -347,7 +359,7 @@ export async function createWorktree(
     if (conflict) {
       throw new Error(`Source branch ${repo.branch} is locked by finish transaction ${conflict.transaction!.id}`);
     }
-    await syncSourceForCreate(pi, ctx, repo.root, repo.upstream, initialZh);
+    await syncSourceForCreate(pi, ctx, repo, initialZh);
   });
   repo = await discoverRepo(pi, repo.root);
   if (repo.root !== originalSourcePath || repo.commonDir !== originalCommonDir || repo.branch !== originalSourceBranch) {

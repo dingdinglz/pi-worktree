@@ -6,7 +6,7 @@ import type {
   RepoInfo,
   UpstreamInfo,
 } from "./types.ts";
-import { canonicalPath, redactSecrets, safeRepoSegment, shortHash, truncateText } from "./util.ts";
+import { canonicalPath, pathExists, redactSecrets, safeRepoSegment, shortHash, truncateText } from "./util.ts";
 
 export type ExecLike = Pick<ExtensionAPI, "exec">;
 
@@ -215,17 +215,36 @@ const OPERATION_PATHS = [
 
 export async function gitOperationInProgress(executor: ExecLike, cwd: string): Promise<string | undefined> {
   for (const name of OPERATION_PATHS) {
-    const pathResult = await git(executor, cwd, ["rev-parse", "--git-path", name]);
-    if (pathResult.code !== 0) continue;
-    try {
-      const { access } = await import("node:fs/promises");
-      await access(pathResult.stdout.trim());
-      return name;
-    } catch {
-      // Not present.
-    }
+    const path = await gitOk(executor, cwd, ["rev-parse", "--git-path", name]);
+    // Git may return a path relative to its cwd, not the extension process cwd.
+    if (await pathExists(resolve(cwd, path))) return name;
   }
   return undefined;
+}
+
+export async function fastForwardCheckout(
+  executor: ExecLike,
+  expected: Pick<RepoInfo, "root" | "commonDir" | "branch" | "head">,
+  targetHead: string,
+  signal?: AbortSignal,
+): Promise<void> {
+  if (!/^[0-9a-f]{40,64}$/i.test(targetHead)) throw new Error("Fast-forward requires an exact commit ID");
+  const before = await discoverRepo(executor, expected.root);
+  if (before.root !== expected.root || before.commonDir !== expected.commonDir ||
+      before.branch !== expected.branch || before.head !== expected.head) {
+    throw new Error("Source checkout, branch, or HEAD changed after fast-forward confirmation");
+  }
+  const operation = await gitOperationInProgress(executor, expected.root);
+  if (operation || !(await isClean(executor, expected.root))) {
+    throw new Error("Source checkout must be clean and have no Git operation in progress before fast-forwarding");
+  }
+  signal?.throwIfAborted();
+  await gitOk(executor, expected.root, ["merge", "--ff-only", targetHead], "Unable to fast-forward source branch", { signal });
+  const after = await discoverRepo(executor, expected.root);
+  if (after.root !== expected.root || after.commonDir !== expected.commonDir ||
+      after.branch !== expected.branch || after.head !== targetHead || !(await isClean(executor, expected.root))) {
+    throw new Error("Source checkout changed unexpectedly during fast-forward hooks; inspect it before resuming");
+  }
 }
 
 export async function branchExists(executor: ExecLike, cwd: string, branch: string): Promise<boolean> {
@@ -279,9 +298,12 @@ export async function remoteBranchSha(
   branch: string,
 ): Promise<string | undefined> {
   const result = await git(executor, cwd, ["ls-remote", "--heads", "--", remote, `refs/heads/${branch}`], { timeout: 30_000 });
-  if (result.code !== 0 || !result.stdout.trim()) return undefined;
-  const sha = result.stdout.trim().split(/\s+/)[0];
-  if (!/^[0-9a-f]{40,64}$/i.test(sha)) throw new Error(`Remote ${remote}/${branch} returned an invalid commit ID`);
+  if (result.code !== 0) throw new GitError(`Unable to query remote ${remote}/${branch}`, ["ls-remote"], result);
+  if (!result.stdout.trim()) return undefined;
+  const [sha, ref] = result.stdout.trim().split(/\s+/);
+  if (!/^[0-9a-f]{40,64}$/i.test(sha) || ref !== `refs/heads/${branch}`) {
+    throw new Error(`Remote ${remote}/${branch} returned an invalid branch or commit ID`);
+  }
   return sha;
 }
 

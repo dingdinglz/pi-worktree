@@ -120,6 +120,27 @@ describe("registry", () => {
     expect((await registry.records()).map((item) => item.id)).toEqual([first.id]);
   });
 
+  it("does not overwrite a transaction started by another session in the same worktree", async () => {
+    const root = await tempDir();
+    cleanup.push(root);
+    const registry = new Registry(root);
+    const item = record(`${root}/same-worktree`);
+    await registry.add(item);
+    const transaction = {
+      id: "tx-1", sessionId: "session-1", mode: "merge" as const, phase: "agent_prepare" as const,
+      sourceHead: item.sourceHead, startedAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+    };
+    await registry.beginFinishTransaction(item.id, transaction);
+    await expect(registry.beginFinishTransaction(item.id, {
+      ...transaction, id: "tx-2", sessionId: "session-2",
+    })).rejects.toThrow(/transaction/i);
+    await expect(registry.beginFinishTransaction(item.id, {
+      ...transaction, sessionId: "session-2",
+    })).rejects.toThrow(/transaction/i);
+    expect((await registry.findById(item.id))?.transaction).toEqual(transaction);
+    await expect(registry.beginFinishTransaction(item.id, transaction)).resolves.toMatchObject({ state: "finish_active" });
+  });
+
   it("atomically rejects two active finish transactions for the same source branch", async () => {
     const root = await tempDir();
     cleanup.push(root);

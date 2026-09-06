@@ -94,6 +94,18 @@ describe("launcher detection", () => {
     ).toBe(process.execPath);
   });
 
+  it("expands placeholder values literally and only once", () => {
+    const cwd = "/tmp/$&/{branch}/{pi}";
+    const task = "keep $& and {pi} literal";
+    const custom: EffectiveConfig = {
+      ...config,
+      launcher: { mode: "custom", command: [process.execPath, "{path}", "{task}", "{pi}", "{piArgs}"] },
+    };
+    const plan = buildLaunchPlan({ record: { ...record, task }, config: custom, cwd, environment: { PATH: "" } });
+    expect(plan?.args[0]).toBe(cwd);
+    expect(plan?.args[1]).toBe(task);
+  });
+
   it("rejects an unavailable configured launcher", () => {
     const custom: EffectiveConfig = {
       ...config,

@@ -1,3 +1,4 @@
+import { join } from "node:path";
 import type {
   ExtensionAPI,
   ExtensionCommandContext,
@@ -17,6 +18,7 @@ import {
   commitSummary,
   currentHead,
   discoverRepo,
+  fastForwardCheckout,
   getUpstream,
   gitOk,
   gitOperationInProgress,
@@ -38,11 +40,12 @@ import { resolveLocale } from "./i18n.ts";
 import type { Registry } from "./registry.ts";
 import type {
   FinishMode,
+  Locale,
   ManagedWorktree,
   PrPlan,
   WorktreeHistoryEntry,
 } from "./types.ts";
-import { assertSupportedPlatform, canonicalPath, newId, nowIso, pathExists, redactSecrets, truncateText, withFileLock, withFileLocks } from "./util.ts";
+import { assertSupportedPlatform, canonicalPath, newId, nowIso, pathExists, readTextFileSafe, redactSecrets, truncateText, withFileLock, withFileLocks } from "./util.ts";
 
 export interface PrepareInput {
   transactionId: string;
@@ -84,14 +87,16 @@ async function strictTarget(
   const target = await discoverRepo(pi, record.path);
   if (target.root !== record.path) throw new Error("Managed worktree path was moved or replaced");
   if (target.commonDir !== record.repoCommonDir) throw new Error("Managed worktree now belongs to a different Git repository");
+  const operation = await gitOperationInProgress(pi, record.path);
+  const resumingRebase = allowRebaseInProgress && (operation === "rebase-merge" || operation === "rebase-apply") &&
+    (await readTextFileSafe(join(target.gitDir, operation, "head-name")))?.trim() === `refs/heads/${record.branch}`;
   if (target.branch !== record.branch) {
-    const mayRecreate = allowMissingRecordedBranch && !target.branch && !(await branchExists(pi, record.path, record.branch));
-    if (!mayRecreate) {
+    const mayRecreate = allowMissingRecordedBranch && !operation && !target.branch && !(await branchExists(pi, record.path, record.branch));
+    if (!mayRecreate && !(resumingRebase && !target.branch)) {
       throw new Error(`Managed worktree must be on ${record.branch}; it is currently on ${target.branch || "detached HEAD"}`);
     }
   }
-  const operation = await gitOperationInProgress(pi, record.path);
-  if (operation && !(allowRebaseInProgress && (operation === "rebase-merge" || operation === "rebase-apply"))) {
+  if (operation && !resumingRebase) {
     throw new Error(`Worktree has an unfinished Git operation: ${operation}`);
   }
   return target.head;
@@ -102,18 +107,20 @@ async function refreshSource(
   record: ManagedWorktree,
   allowFastForward: boolean,
   ctx?: ExtensionContext,
+  locale: Locale = "auto",
 ): Promise<string> {
   const before = await strictSource(pi, record);
   const upstream = await getUpstream(pi, record.sourcePath, record.sourceBranch);
   if (!upstream) return before.head;
   await gitOk(pi, record.sourcePath, ["fetch", "--", upstream.remote], `Unable to fetch ${upstream.remote}`, { timeout: 120_000 });
-  const relation = await aheadBehind(pi, record.sourcePath, "HEAD", `refs/remotes/${upstream.remote}/${upstream.branch}`);
-  if (!relation) return (await currentHead(pi, record.sourcePath));
+  const upstreamHead = await gitOk(pi, record.sourcePath, ["rev-parse", "--verify", `refs/remotes/${upstream.remote}/${upstream.branch}^{commit}`]);
+  const relation = await aheadBehind(pi, record.sourcePath, before.head, upstreamHead);
+  if (!relation) throw new Error(`Unable to compare source branch with ${upstream.short}`);
   if (relation.ahead > 0 && relation.behind > 0) {
     throw new Error(`Source branch diverged from ${upstream.short}; reconcile it manually`);
   }
   if (relation.behind > 0) {
-    const zh = resolveLocale("auto") === "zh-CN";
+    const zh = resolveLocale(locale) === "zh-CN";
     if (!allowFastForward || !ctx) {
       throw new Error(`Source branch is behind ${upstream.short}; resume /wt finish to approve a fast-forward`);
     }
@@ -124,15 +131,14 @@ async function refreshSource(
         : `${record.sourcePath}\n${record.sourceBranch} is behind ${upstream.short} by ${relation.behind} commit(s).`,
     );
     if (!approved) throw new Error("Source fast-forward was not approved");
-    await gitOk(
-      pi,
-      record.sourcePath,
-      ["merge", "--ff-only", `refs/remotes/${upstream.remote}/${upstream.branch}`],
-      "Unable to fast-forward source branch",
-    );
-    await strictSource(pi, record);
+    await fastForwardCheckout(pi, {
+      root: record.sourcePath,
+      commonDir: record.repoCommonDir,
+      branch: record.sourceBranch,
+      head: before.head,
+    }, upstreamHead);
   }
-  return currentHead(pi, record.sourcePath);
+  return (await strictSource(pi, record)).head;
 }
 
 function finishPrompt(record: ManagedWorktree, mode: FinishMode, sourceHead: string, transactionId: string): string {
@@ -144,7 +150,8 @@ function finishPrompt(record: ManagedWorktree, mode: FinishMode, sourceHead: str
     `Recorded source branch: ${record.sourceBranch}`,
     `Required source SHA: ${sourceHead}`,
     "",
-    `If ${record.branch} was manually removed and this checkout is detached, recreate it at the current HEAD before committing.`,
+    "If a rebase is in progress, resolve its conflicts and finish it with git rebase --continue before starting another rebase. Do not recreate or switch branches during an active rebase.",
+    `Only if no rebase is in progress and ${record.branch} was manually removed, recreate the missing branch at the current HEAD before committing.`,
     "Review the diff and Git status. Stage only intended files and create one or more meaningful commits.",
     `Rebase ${record.branch} onto the exact source SHA ${sourceHead}; resolve conflicts without modifying the source checkout.`,
     "Do not bypass Git hooks or signing. The worktree must be clean when ready.",
@@ -347,19 +354,24 @@ export class FinishCoordinator {
     if (resume && !existing) throw new Error("There is no paused transaction to resume");
     if (existing && existing.mode !== mode) throw new Error(`The existing transaction mode is ${existing.mode}, not ${mode}`);
     const currentSessionId = ctx.sessionManager.getSessionId();
-    if (existing?.sessionId && existing.sessionId !== currentSessionId &&
+    if (existing && existing.sessionId !== currentSessionId &&
         ["agent_prepare", "publish_authorized"].includes(existing.phase)) {
       if (!resume) throw new Error("The finish transaction is owned by another pi session; use --resume to review a takeover");
-      const takeover = await ctx.ui.confirm(
-        "Take over finish transaction?",
-        `Transaction ${existing.id} belongs to session ${existing.sessionId}. Takeover prevents that session from using the managed finish tools, but does not stop its external Git commands.`,
-      );
-      if (!takeover) return;
+      if (existing.sessionId) {
+        const takeover = await ctx.ui.confirm(
+          "Take over finish transaction?",
+          `Transaction ${existing.id} belongs to session ${existing.sessionId}. Takeover prevents that session from using the managed finish tools, but does not stop its external Git commands.`,
+        );
+        if (!takeover) return;
+      }
+      // Claim legacy transactions here too, before any recovery path can activate tools and return early.
       record = await this.registry.update(record.id, (item) => {
-        if (item.transaction?.id !== existing.id || item.transaction.sessionId !== existing.sessionId) {
-          throw new Error("Finish transaction changed before session takeover");
+        if (item.transaction?.id !== existing.id || item.transaction.sessionId !== existing.sessionId ||
+            item.transaction.phase !== existing.phase || item.transaction.mode !== existing.mode) {
+          throw new Error("Finish transaction changed before session ownership could be acquired");
         }
         item.transaction.sessionId = currentSessionId;
+        item.transaction.updatedAt = nowIso();
         item.state = "finish_paused";
       });
       existing.sessionId = currentSessionId;
@@ -407,11 +419,14 @@ export class FinishCoordinator {
     });
     const zh = resolveLocale(config.locale) === "zh-CN";
 
-    if (resume && existing?.phase === "publish_authorized" && existing.pr && existing.workHead) {
+    const recoveringRebase = resume && existing && ["rebase-merge", "rebase-apply"].includes(
+      (await gitOperationInProgress(this.pi, record.path)) ?? "",
+    );
+    if (resume && !recoveringRebase && existing?.phase === "publish_authorized" && existing.pr && existing.workHead) {
       const targetHead = await strictTarget(this.pi, record);
       const sourceHead = await withFileLock(
         this.registry.sourceLockPath(record.repoCommonDir, record.sourceBranch),
-        () => refreshSource(this.pi, record, true, ctx),
+        () => refreshSource(this.pi, record, true, ctx, config.locale),
       );
       if (targetHead !== existing.workHead || sourceHead !== existing.sourceHead || !(await isClean(this.pi, record.path))) {
         await this.setNeedsPrepare(record, sourceHead);
@@ -486,7 +501,7 @@ export class FinishCoordinator {
       await this.registry.update(record.id, (item) => {
         if (item.transaction?.id === existing.id) item.transaction.pr = approvedPr;
       });
-      const commands = prCommands(approvedPr);
+      const commands = prCommands(approvedPr, existing.workHead);
       this.tools.activate();
       this.pi.sendUserMessage([
         `Resume approved PR transaction ${existing.id}.`,
@@ -503,34 +518,14 @@ export class FinishCoordinator {
     const targetHead = await strictTarget(this.pi, record, resume && Boolean(existing), true);
     const sourceHead = await withFileLock(
       this.registry.sourceLockPath(record.repoCommonDir, record.sourceBranch),
-      async (): Promise<string | undefined> => {
-        await strictSource(this.pi, record);
-        const upstream = await getUpstream(this.pi, record.sourcePath, record.sourceBranch);
-        if (upstream) {
-          await gitOk(this.pi, record.sourcePath, ["fetch", "--", upstream.remote], `Unable to fetch ${upstream.remote}`, { timeout: 120_000 });
-          const relation = await aheadBehind(this.pi, record.sourcePath, "HEAD", `refs/remotes/${upstream.remote}/${upstream.branch}`);
-          if (relation?.ahead && relation.behind) throw new Error(`Source branch diverged from ${upstream.short}`);
-          if (relation?.behind) {
-            const approved = await ctx.ui.confirm(
-              zh ? "快进记录的来源分支？" : "Fast-forward recorded source branch?",
-              zh
-                ? `${record.sourcePath}\n${record.sourceBranch} 落后于 ${upstream.short} ${relation.behind} 个提交。`
-                : `${record.sourcePath}\n${record.sourceBranch} is behind ${upstream.short} by ${relation.behind} commit(s).`,
-            );
-            if (!approved) return undefined;
-            await gitOk(
-              this.pi,
-              record.sourcePath,
-              ["merge", "--ff-only", `refs/remotes/${upstream.remote}/${upstream.branch}`],
-              "Unable to fast-forward source branch",
-            );
-            await strictSource(this.pi, record);
-          }
-        }
-        return currentHead(this.pi, record.sourcePath);
-      },
+      () => refreshSource(this.pi, record, true, ctx, config.locale),
     );
-    if (!sourceHead) return;
+    if (recoveringRebase && existing) {
+      await this.setNeedsPrepare(record, sourceHead);
+      this.tools.activate();
+      this.pi.sendUserMessage(finishPrompt(record, mode, sourceHead, existing.id));
+      return;
+    }
 
     if ((await isClean(this.pi, record.path)) && (targetHead === sourceHead || (await isAncestor(this.pi, record.path, targetHead, sourceHead)))) {
       const approved = await ctx.ui.confirm(
@@ -543,6 +538,8 @@ export class FinishCoordinator {
       const timestamp = nowIso();
       await this.registry.update(record.id, (item) => {
         item.state = "cleanup_pending";
+        // This result is verified by local ancestry, not by a historical PR.
+        item.prUrl = undefined;
         item.transaction = {
           id: newId(),
           mode,
@@ -691,6 +688,7 @@ export class FinishCoordinator {
   async prepare(input: PrepareInput, signal: AbortSignal | undefined, ctx: ExtensionContext): Promise<string> {
     if (ctx.mode !== "tui") throw new Error("Finish preparation requires interactive TUI mode");
     assertSupportedPlatform();
+    signal?.throwIfAborted();
     let record = await this.recordForContext(ctx);
     const transaction = record.transaction;
     if (!transaction || transaction.id !== input.transactionId || transaction.phase !== "agent_prepare" ||
@@ -732,6 +730,7 @@ export class FinishCoordinator {
       context: { record, mode: transaction.mode, transactionId: transaction.id },
       signal,
     });
+    signal?.throwIfAborted();
     if (!hookResult.ok) {
       throw new Error(`${hookResult.error}${hookResult.stderr ? `\n${hookResult.stderr}` : ""}${hookResult.logPath ? `\nFull local log: ${hookResult.logPath}` : ""}`);
     }
@@ -740,14 +739,16 @@ export class FinishCoordinator {
     }
 
     const summary = await commitSummary(this.pi, record.path, latestSource);
-    if (!(await ctx.ui.confirm(zh ? "批准提交和质量门禁？" : "Approve commits and quality gates?", summary))) {
+    if (!(await ctx.ui.confirm(zh ? "批准提交和质量门禁？" : "Approve commits and quality gates?", summary, { signal }))) {
       throw new Error("User declined the commit set; revise it before preparing again");
     }
 
+    signal?.throwIfAborted();
     if (transaction.mode === "merge") {
       const approved = await ctx.ui.confirm(
         zh ? "快进记录的来源 checkout？" : "Fast-forward recorded source checkout?",
         `${summary}\n\n${record.sourcePath}\n${record.sourceBranch}: ${latestSource.slice(0, 12)} -> ${workHead.slice(0, 12)}\n\n${zh ? "不会执行远端 push。" : "No remote push will occur."}`,
+        { signal },
       );
       if (!approved) throw new Error("User declined the source branch update");
       const mergedHead = await withFileLock(
@@ -764,11 +765,14 @@ export class FinishCoordinator {
             await this.setNeedsPrepare(record, finalSourceHead);
             throw new Error(`Source changed to ${finalSourceHead}; rebase and prepare again`);
           }
-          const targetNow = await currentHead(this.pi, record.path);
+          const targetNow = await strictTarget(this.pi, record);
           if (targetNow !== workHead || !(await isClean(this.pi, record.path))) {
             throw new Error("Worktree changed after approval; prepare again");
           }
-          await gitOk(this.pi, record.sourcePath, ["merge", "--ff-only", workHead], "Final fast-forward merge failed");
+          signal?.throwIfAborted();
+          await fastForwardCheckout(this.pi, {
+            root: record.sourcePath, commonDir: record.repoCommonDir, branch: record.sourceBranch, head: latestSource,
+          }, workHead, signal);
           const completedSource = await discoverRepo(this.pi, record.sourcePath);
           const completedHead = completedSource.head;
           if (completedSource.root !== record.sourcePath || completedSource.commonDir !== record.repoCommonDir ||
@@ -781,6 +785,7 @@ export class FinishCoordinator {
               throw new Error("Finish transaction changed during local merge");
             }
             item.state = "merged_cleanup_pending";
+            item.prUrl = undefined;
             item.transaction.phase = "awaiting_cleanup";
             item.transaction.cleanupAttemptId = undefined;
             item.transaction.workHead = workHead;
@@ -793,6 +798,7 @@ export class FinishCoordinator {
       );
       record = (await this.registry.findById(record.id))!;
       ctx.ui.notify("The work branch was fast-forwarded into its recorded source checkout.", "info");
+      signal?.throwIfAborted();
       await this.cleanup(ctx, record, "merged", mergedHead);
       return `Merged ${record.branch} into ${record.sourcePath}:${record.sourceBranch} at ${mergedHead}.`;
     }
@@ -832,13 +838,14 @@ export class FinishCoordinator {
       const approved = await ctx.ui.confirm(
         zh ? "远端工作分支需要改写历史" : "Remote work branch requires history rewrite",
         `${plan.pushRemote}/${plan.headBranch}\nRemote: ${remoteSha}\nLocal:  ${workHead}\n\nAllow an exact --force-with-lease update?`,
+        { signal },
       );
       if (!approved) throw new Error("Remote branch update was not approved");
       forceLeaseSha = remoteSha;
     }
     const bodyFile = await writeApprovedPrBody(this.registry, transaction.id, body);
     const approvedPlan: PrPlan = { ...plan, title, body, bodyFile, draft, forceLeaseSha, expectedRemoteSha: remoteSha };
-    const command = prCommands(approvedPlan);
+    const command = prCommands(approvedPlan, workHead);
     const preview = [
       summary,
       "",
@@ -856,21 +863,43 @@ export class FinishCoordinator {
       command.draftStatus ? `Draft-status command:\n${command.draftStatus}` : "",
       command.create ? `Create command:\n${command.create}` : `Existing PR: ${approvedPlan.existingUrl}`,
     ].filter(Boolean).join("\n");
-    if (!(await ctx.ui.confirm(zh ? "批准远端发布？" : "Approve remote publication?", preview))) {
+    if (!(await ctx.ui.confirm(zh ? "批准远端发布？" : "Approve remote publication?", preview, { signal }))) {
       await this.registry.removePrBody(bodyFile);
       throw new Error("User declined PR publication");
     }
     try {
-      await this.registry.update(record.id, (item) => {
-        if (item.transaction?.id !== transaction.id || item.transaction.phase !== "agent_prepare" ||
-            item.transaction.sessionId !== transaction.sessionId) {
-          throw new Error("Finish transaction changed before publication authorization");
+      await withFileLocks([
+        this.registry.sourceLockPath(record.repoCommonDir, record.sourceBranch),
+        this.registry.sourceLockPath(record.repoCommonDir, record.branch),
+      ], async () => {
+        signal?.throwIfAborted();
+        await validatePrPlanRemotes(this.pi, record.path, record.sourcePath, approvedPlan);
+        const finalSourceHead = await refreshSource(this.pi, record, false);
+        const finalWorkHead = await strictTarget(this.pi, record);
+        if (finalSourceHead !== latestSource || finalWorkHead !== workHead || !(await isClean(this.pi, record.path))) {
+          await this.setNeedsPrepare(record, finalSourceHead);
+          throw new Error("Source or worktree changed during publication approval; rebase and prepare again");
         }
-        item.state = "publish_authorized";
-        item.transaction.phase = "publish_authorized";
-        item.transaction.workHead = workHead;
-        item.transaction.pr = approvedPlan;
-        item.transaction.updatedAt = nowIso();
+        const finalRemoteSha = await remoteBranchSha(this.pi, record.path, plan.pushRemote, plan.headBranch);
+        if (finalRemoteSha !== remoteSha) {
+          throw new Error("Remote work branch changed during publication approval; prepare again");
+        }
+        if (!(await this.registry.validatePrBodyFile(bodyFile, body))) {
+          throw new Error("Approved PR body file changed before publication authorization; prepare again");
+        }
+        signal?.throwIfAborted();
+        await this.registry.update(record.id, (item) => {
+          signal?.throwIfAborted();
+          if (item.transaction?.id !== transaction.id || item.transaction.phase !== "agent_prepare" ||
+              item.transaction.sessionId !== transaction.sessionId) {
+            throw new Error("Finish transaction changed before publication authorization");
+          }
+          item.state = "publish_authorized";
+          item.transaction.phase = "publish_authorized";
+          item.transaction.workHead = workHead;
+          item.transaction.pr = approvedPlan;
+          item.transaction.updatedAt = nowIso();
+        });
       });
     } catch (error) {
       await this.registry.removePrBody(bodyFile);

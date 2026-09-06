@@ -52,7 +52,7 @@ pi -e ./src/index.ts
 1. extension 检查并同步记录的来源 checkout。
 2. 当前 agent 检查修改、stage、commit 并 rebase，此时还不能发布。
 3. `worktree_prepare` 运行质量门禁，并展示 commits、PR title/body/draft。
-4. 你批准后，agent 才使用明确的 push 和非交互 `gh pr create` 命令。
+4. 你批准后，agent 才使用明确的 push 和非交互 `gh pr create` 命令。Push 固定到已审核的提交 SHA，不会随之后的 `HEAD` 变化而发布其他提交。
 5. `worktree_finalize` 验证远端 SHA、head/base、title/body 和 draft 状态。
 6. 最后确认后，当前 pi 退出，独立 helper 删除 worktree。本地和远端 PR 分支保留。
 
@@ -65,7 +65,9 @@ pi -e ./src/index.ts
 3. extension 不会自动 push `develop`。
 4. 最终确认后删除 worktree，并用安全的 `git branch -d` 删除已经合入的本地工作分支。
 
-如果来源分支在过程中变化，流程会停止并要求重新 rebase，不会偷偷制造 merge commit。
+如果来源分支在过程中变化，流程会停止并要求重新 rebase，不会偷偷制造 merge commit。Rebase 中断后可使用 `/wt finish <pr|merge> --resume` 继续处理。
+
+选定的 push remote 必须只有一个 push URL，且与 fetch URL 指向同一仓库。如果 fork 的推送目标不同，请为其配置独立 remote；发布前会拒绝不匹配或多个推送目标。
 
 ## 命令
 
