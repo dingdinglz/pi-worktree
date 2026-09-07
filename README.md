@@ -1,8 +1,8 @@
-# @dingdinglz/pi-worktree
+# @dinglz/pi-worktree
 
 Safe, AI-assisted Git worktree workflows for the [pi coding agent](https://github.com/earendil-works/pi-mono).
 
-> 中文文档：[README.zh-CN.md](README.zh-CN.md)
+> 中文文档：[README.zh-CN.md](README.zh-CN.md) · [npm package](https://www.npmjs.com/package/@dinglz/pi-worktree)
 
 `pi-worktree` remembers the exact checkout and branch from which a worktree was created. A local finish returns work to that exact checkout—not to an assumed `main` directory—and a PR finish verifies the pushed SHA and GitHub PR before cleaning up.
 
@@ -11,7 +11,20 @@ Safe, AI-assisted Git worktree workflows for the [pi coding agent](https://githu
 Global installation is recommended so recovery commands remain available from both the source checkout and managed worktrees:
 
 ```bash
-pi install git:github.com/dingdinglz/pi-worktree
+pi install npm:@dinglz/pi-worktree
+```
+
+To update to the latest npm release:
+
+```bash
+pi update npm:@dinglz/pi-worktree
+```
+
+If you previously installed from Git, switch sources once:
+
+```bash
+pi remove git:github.com/dingdinglz/pi-worktree
+pi install npm:@dinglz/pi-worktree
 ```
 
 For local development:
@@ -192,6 +205,24 @@ npm run check
 ```
 
 Tests use temporary local Git repositories and fake gh/terminal adapters; they do not create real PRs or mutate personal repositories.
+
+### Publishing
+
+Interactive publishing requires an npm account with access to the `@dinglz` scope and two-factor authentication enabled. Authenticate against the official registry:
+
+```bash
+npm login --registry=https://registry.npmjs.org/
+```
+
+Update the version in `package.json` and `package-lock.json`, and record the release in `CHANGELOG.md`. Then, from a checkout with dependencies installed:
+
+```bash
+npm run check
+npm pack --dry-run
+npm publish
+```
+
+`publishConfig` makes the scoped package public and publishes to the official npm registry even when the local default registry is a mirror. The package ships its TypeScript extension sources directly; no build step is required.
 
 ## License
 

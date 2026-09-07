@@ -5,6 +5,10 @@ All notable changes to this project are documented here. The project follows
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-09-07
+
+- First public npm release as `@dinglz/pi-worktree`, with npm installation, update, migration, and publishing instructions in both READMEs.
+- Pin publishing to the official npm registry with public access.
 - Fix Git operation detection outside the agent's working directory and revalidate checkout identity before source fast-forwards; preserve local creation when the upstream ref is missing.
 - Recheck source, worktree, remote, and cancellation state before PR authorization; pin pushes to the approved commit even when a branch or tag shadows its SHA, and reject mismatched push URLs.
 - Restore interrupted rebase recovery and local finish/cleanup for reopened PR worktrees.

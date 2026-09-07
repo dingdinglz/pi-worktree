@@ -1,8 +1,8 @@
-# @dingdinglz/pi-worktree
+# @dinglz/pi-worktree
 
 为 [pi coding agent](https://github.com/earendil-works/pi-mono) 提供安全、可恢复并由 AI 辅助的 Git worktree 工作流。
 
-> English documentation: [README.md](README.md)
+> English documentation: [README.md](README.md) · [npm 包](https://www.npmjs.com/package/@dinglz/pi-worktree)
 
 `pi-worktree` 会记录 worktree 是从**哪个 checkout 路径、哪个分支和哪个提交**创建的。本地完成时，结果会回到那个准确的目录和分支，而不是猜测某个 `main` 目录。
 
@@ -11,7 +11,20 @@
 建议全局安装，这样来源目录、工作 worktree 和恢复流程中都能使用命令：
 
 ```bash
-pi install git:github.com/dingdinglz/pi-worktree
+pi install npm:@dinglz/pi-worktree
+```
+
+更新到最新 npm 版本：
+
+```bash
+pi update npm:@dinglz/pi-worktree
+```
+
+如果之前通过 Git 安装，先切换一次安装来源：
+
+```bash
+pi remove git:github.com/dingdinglz/pi-worktree
+pi install npm:@dinglz/pi-worktree
 ```
 
 本地开发：
@@ -193,6 +206,24 @@ npm run check
 ```
 
 测试使用临时本地 Git 仓库以及假的 gh/terminal adapter，不会创建真实 PR，也不会修改个人仓库。
+
+### 发布
+
+交互式发布需要使用有权发布到 `@dinglz` 作用域的 npm 账号，并启用双重验证。先登录 npm 官方仓库：
+
+```bash
+npm login --registry=https://registry.npmjs.org/
+```
+
+同步更新 `package.json`、`package-lock.json` 中的版本，并在 `CHANGELOG.md` 记录发布内容。安装好开发依赖后执行：
+
+```bash
+npm run check
+npm pack --dry-run
+npm publish
+```
+
+`publishConfig` 将 scoped 包设为公开，并固定发布到 npm 官方仓库，即使本机默认 registry 使用镜像也不受影响。包直接分发 TypeScript extension 源码，无需构建。
 
 ## License
 

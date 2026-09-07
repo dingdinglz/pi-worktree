@@ -1,6 +1,6 @@
 {
-  "name": "@dingdinglz/pi-worktree",
-  "version": "0.1.0",
+  "name": "@dinglz/pi-worktree",
+  "version": "0.1.1",
   "description": "Safe, AI-assisted Git worktree workflows for the pi coding agent",
   "type": "module",
   "license": "MIT",
@@ -13,7 +13,8 @@
     "url": "https://github.com/dingdinglz/pi-worktree/issues"
   },
   "publishConfig": {
-    "access": "public"
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
   },
   "keywords": [
     "pi-package",
