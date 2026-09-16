@@ -4,6 +4,7 @@ import { constants } from "node:fs";
 import { delimiter, isAbsolute, resolve } from "node:path";
 import type { HookRunResult, HookStep, ManagedWorktree } from "./types.ts";
 import type { Registry } from "./registry.ts";
+import { formatHookCommand } from "./hook-commands.ts";
 import { redactSecrets, truncateText } from "./util.ts";
 
 const MAX_CAPTURE_BYTES = 2 * 1024 * 1024;
@@ -27,7 +28,7 @@ async function executableExists(command: string, cwd: string, environment: NodeJ
 }
 
 export function describeHookStep(step: HookStep): string {
-  const command = step.shell ? `[shell] ${step.command}` : [step.command, ...(step.args ?? [])].join(" ");
+  const command = `${step.shell ? "[shell] " : ""}${formatHookCommand(step)}`;
   const details = [
     step.timeoutMs ? `timeout=${step.timeoutMs}ms` : "timeout=900000ms",
     step.env && Object.keys(step.env).length > 0

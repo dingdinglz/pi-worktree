@@ -7,7 +7,6 @@ import {
   loadEffectiveConfig,
   readConfig,
   saveConfig,
-  validateConfig,
 } from "./config.ts";
 import {
   aheadBehind,
@@ -26,6 +25,7 @@ import {
   statusEntries,
   validBranchName,
 } from "./git.ts";
+import { editPostCreateSteps } from "./hook-editor.ts";
 import { assertHookCommandsAvailable, describeHookStep, runHookSteps } from "./hooks.ts";
 import { createTranslator, resolveLocale } from "./i18n.ts";
 import { buildLaunchPlan, executeLaunchPlan, manualLaunchCommand } from "./launcher.ts";
@@ -83,36 +83,6 @@ async function rememberSkip(repoKey: string, projectRoot: string, agentDir?: str
     { ...current, version: 1, defaults: { ...current.defaults, missingPostCreate: "skip" } },
     "repo",
   );
-}
-
-async function editPostCreateSteps(
-  ctx: ExtensionCommandContext,
-  steps: HookStep[],
-  zh: boolean,
-): Promise<HookStep[] | undefined> {
-  let draft = JSON.stringify(steps, null, 2);
-  while (true) {
-    const edited = await ctx.ui.editor(
-      zh ? "手动修改 postCreate（JSON 步骤数组）" : "Edit postCreate (JSON step array)",
-      draft,
-    );
-    if (edited === undefined) return undefined;
-    draft = edited;
-    try {
-      if (Buffer.byteLength(edited, "utf8") > 2 * 1024 * 1024) {
-        throw new Error("postCreate exceeds the 2 MiB safety limit");
-      }
-      const parsed: unknown = JSON.parse(edited);
-      if (!Array.isArray(parsed)) throw new Error("postCreate must be a JSON array of hook steps");
-      validateConfig({ version: 1, hooks: { postCreate: parsed } }, "<postCreate>", "repo");
-      return parsed as HookStep[];
-    } catch (error) {
-      ctx.ui.notify(
-        redactSecrets(`${zh ? "postCreate 无效，请修改后重新提交" : "Invalid postCreate; edit and submit again"}: ${error instanceof Error ? error.message : error}`),
-        "error",
-      );
-    }
-  }
 }
 
 async function resolveMissingHook(

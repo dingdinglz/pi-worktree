@@ -164,7 +164,9 @@ PI_WT_TRANSACTION_ID       # 仅 finish hook
 
 缺少 `postCreate` 时，可以让隔离的 pi 生成建议。模型只能看到安全白名单中的 lockfile、package manifest、README、Makefile 和语言工具配置，没有工具权限，不能查看 `.env`，也不能执行建议。建议必须是结构化 argv；你审阅后才会保存到用户侧 per-repo 配置并运行。请求建议时，仅会把这些白名单 manifest 中经过大小限制和脱敏的摘要发送给你当前选择的模型提供方。
 
-生成后可以选择“保存并执行”“手动修改”“仅本次跳过”或“取消”。选择“手动修改”会打开编辑器，预填 `postCreate` 的 JSON 步骤数组。修改内容按 hook 配置规则校验，格式有误时保留草稿供继续修改；提交有效修改后会重新展示步骤供审阅，取消编辑则保留之前的步骤。只有选择“保存并执行”才会写入配置，hook 则在最终确认创建 worktree 后运行。
+生成后可以选择“保存并执行”“手动修改”“仅本次跳过”或“取消”。“手动修改”打开的是有序命令列表，无需编辑 JSON。用 ↑/↓ 选择命令，Enter 修改命令行；`a` 添加，`d` 或 Delete 删除，Alt+↑/↓ 上下移动。按 Ctrl+S 或选择“完成编辑”返回审阅。在命令输入框中按 Esc 放弃当前输入，在列表中按 Esc 放弃本轮列表修改。
+
+直接输入 `pnpm install --frozen-lockfile` 这样的命令即可，插件会自动转换成结构化步骤；带空格的参数请加引号。修改时保留原有超时和环境变量设置，无效输入会保留供继续修改。不会隐式启用 shell 运算符或展开变量：需要时可拆成多条命令，或显式输入 `sh -c 'npm install && npm run build'`、`env NODE_ENV=test npm test`。只有选择“保存并执行”才会写入配置，hook 则在最终确认创建 worktree 后运行。
 
 ### Launcher
 

@@ -1,10 +1,13 @@
 import { readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionCommandContext, KeybindingsManager, Theme } from "@earendil-works/pi-coding-agent";
+import { getKeybindings, type Component, type TUI } from "@earendil-works/pi-tui";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { getConfigPaths, readConfig, saveConfig } from "../src/config.ts";
 import { createWorktree } from "../src/create.ts";
 import { discoverRepo, listWorktrees } from "../src/git.ts";
+import { formatHookCommand } from "../src/hook-commands.ts";
+import * as hookEditor from "../src/hook-editor.ts";
 import piWorktreeExtension from "../src/index.ts";
 import { Registry } from "../src/registry.ts";
 import type { HookStep } from "../src/types.ts";
@@ -55,11 +58,11 @@ async function fixture(locale: "en" | "zh-CN" = "en", proposalSteps = generatedS
   await saveConfig(configPath, initialConfig, "repo");
   const initialText = await readFile(configPath, "utf8");
   const select = vi.fn<ExtensionCommandContext["ui"]["select"]>();
-  const editor = vi.fn<ExtensionCommandContext["ui"]["editor"]>();
+  const editor = vi.spyOn(hookEditor, "editPostCreateSteps");
   const confirm = vi.fn<ExtensionCommandContext["ui"]["confirm"]>().mockResolvedValue(true);
   const ctx = {
     cwd: source, mode: "tui", hasUI: true, thinkingLevel: "off",
-    ui: { select, editor, confirm, custom: vi.fn().mockResolvedValue("topic"), notify: vi.fn() },
+    ui: { select, editor: vi.fn(), confirm, custom: vi.fn().mockResolvedValue("topic"), notify: vi.fn() },
     isProjectTrusted: () => false, waitForIdle: async () => {},
   } as unknown as ExtensionCommandContext;
   const commands = new Map<string, Parameters<ExtensionAPI["registerCommand"]>[1]>();
@@ -100,7 +103,7 @@ describe("reviewing AI postCreate proposals", () => {
     f.editor.mockImplementationOnce(async () => {
       expect(await readFile(f.configPath, "utf8")).toBe(f.initialText);
       expect(await f.registry.records()).toEqual([]);
-      return JSON.stringify(editedSteps);
+      return editedSteps;
     });
     piWorktreeExtension(f.pi);
 
@@ -109,7 +112,8 @@ describe("reviewing AI postCreate proposals", () => {
     const records = await f.registry.records();
     expect(records).toHaveLength(1);
     expect(records[0].state).toBe("active");
-    expect(f.editor).toHaveBeenCalledWith(expect.stringContaining("postCreate"), JSON.stringify(generatedSteps, null, 2));
+    expect(f.editor).toHaveBeenCalledWith(f.ctx, generatedSteps, zh);
+    expect(f.ctx.ui.editor).not.toHaveBeenCalled();
     expect(f.select.mock.calls[2][0]).toContain("generated.txt");
     expect(f.select.mock.calls[3][0]).toContain("edited.txt");
     expect(f.select.mock.calls[3][0]).not.toContain("generated.txt");
@@ -136,39 +140,51 @@ describe("reviewing AI postCreate proposals", () => {
     expect((await readConfig(f.configPath, "repo"))?.hooks?.postCreate).toEqual({ merge: "replace", steps: generatedSteps });
   });
 
-  it.each([
-    ["invalid JSON", "[{"],
-    ["empty input", ""],
-    ["a hook sequence object", '{"steps":[]}'],
-    ["null", "null"],
-    ["an empty command", '[{"command":""}]'],
-    ["non-string arguments", '[{"command":"node","args":[1]}]'],
-    ["an invalid timeout", '[{"command":"node","timeoutMs":-1}]'],
-    ["reserved environment variables", '[{"command":"node","env":{"PI_WT_PATH":"spoofed"}}]'],
-    ["shell mode with argv", '[{"command":"echo","shell":true,"args":["hello"]}]'],
-    ["oversized input", " ".repeat(2 * 1024 * 1024 + 1)],
-  ])("retains %s for correction without saving or running it", async (_description, invalid) => {
+  it("converts real list edits into saved JSON and executes only the final ordered commands", async () => {
     const f = await fixture();
+    f.editor.mockRestore();
+    const appendStep = (text: string): HookStep => ({
+      command: process.execPath, args: ["-e", `require('node:fs').appendFileSync('order.txt', '${text}\\n')`],
+    });
+    const first = { ...appendStep("first"), timeoutMs: generatedSteps[0].timeoutMs };
+    const second = appendStep("second");
     f.select.mockResolvedValueOnce("Ask AI for a proposal").mockResolvedValueOnce("Edit manually").mockResolvedValueOnce("Save and run");
-    f.editor.mockResolvedValueOnce(invalid).mockImplementationOnce(async () => {
+    f.ctx.ui.custom = vi.fn().mockImplementation(async (factory: Parameters<ExtensionCommandContext["ui"]["custom"]>[0]) => {
       expect(await readFile(f.configPath, "utf8")).toBe(f.initialText);
       expect(await pathExists(f.target)).toBe(false);
-      return JSON.stringify(editedSteps);
+      return new Promise((resolve) => {
+        const tui = { terminal: { rows: 30, columns: 100 }, requestRender: () => {} } as unknown as TUI;
+        const theme = { fg: (_color: string, text: string) => text } as unknown as Theme;
+        const dialog = factory(tui, theme, getKeybindings() as KeybindingsManager, resolve) as Component;
+        const input = (...keys: string[]) => { for (const key of keys) dialog.handleInput!(key); };
+        const paste = (line: string) => input(`\x1b[200~${line}\x1b[201~`);
+        input("\r", "\x01", "\x0b");
+        paste("node 'invalid");
+        input("\r");
+        expect(dialog.render(100).join("\n")).toContain("Invalid command");
+        input("\x01", "\x0b");
+        paste(formatHookCommand(first));
+        input("\r", "a");
+        paste(formatHookCommand(second));
+        input("\r", "\x1b[1;3A", "a");
+        paste(formatHookCommand(appendStep("removed")));
+        input("\r", "d", "\x13");
+      });
     });
 
     expect((await f.create())?.state).toBe("active");
 
-    expect(f.editor).toHaveBeenNthCalledWith(2, expect.any(String), invalid);
-    expect(f.ctx.ui.notify).toHaveBeenCalledWith(expect.stringContaining("Invalid postCreate"), "error");
-    expect(f.select.mock.calls.at(-1)?.[0]).toContain("edited.txt");
-    expect(await readFile(join(f.target, "edited.txt"), "utf8")).toBe("edited");
+    expect((await readConfig(f.configPath, "repo"))?.hooks?.postCreate).toEqual({ merge: "replace", steps: [second, first] });
+    expect(await readFile(join(f.target, "order.txt"), "utf8")).toBe("second\nfirst\n");
     expect(await pathExists(join(f.target, "generated.txt"))).toBe(false);
+    expect(await pathExists(join(f.source, "order.txt"))).toBe(false);
+    expect(f.ctx.ui.editor).not.toHaveBeenCalled();
   });
 
   it.each(["Skip once", "Cancel", undefined])("does not save or run edited steps when review ends with %s", async (action) => {
     const f = await fixture();
     f.select.mockResolvedValueOnce("Ask AI for a proposal").mockResolvedValueOnce("Edit manually").mockResolvedValueOnce(action);
-    f.editor.mockResolvedValueOnce(JSON.stringify(editedSteps));
+    f.editor.mockResolvedValueOnce(editedSteps);
 
     const created = await f.create();
 
@@ -190,17 +206,13 @@ describe("reviewing AI postCreate proposals", () => {
       .mockResolvedValueOnce("Edit manually")
       .mockResolvedValueOnce("Save and run");
     f.editor
-      .mockResolvedValueOnce(JSON.stringify(editedSteps))
-      .mockResolvedValueOnce("invalid")
+      .mockResolvedValueOnce(editedSteps)
       .mockResolvedValueOnce(undefined)
       .mockResolvedValueOnce(undefined);
 
     expect((await f.create())?.state).toBe("active");
 
-    expect(f.editor.mock.calls.map(([, draft]) => draft)).toEqual([
-      JSON.stringify(generatedSteps, null, 2), JSON.stringify(editedSteps, null, 2),
-      "invalid", JSON.stringify(editedSteps, null, 2),
-    ]);
+    expect(f.editor.mock.calls.map(([, draft]) => draft)).toEqual([generatedSteps, editedSteps, editedSteps]);
     expect(await readFile(join(f.target, "edited.txt"), "utf8")).toBe("edited");
     expect(await pathExists(join(f.target, "generated.txt"))).toBe(false);
   });
@@ -222,7 +234,7 @@ describe("reviewing AI postCreate proposals", () => {
     const steps = initiallyEmpty ? editedSteps : [];
     const f = await fixture("en", initiallyEmpty ? [] : generatedSteps);
     f.select.mockResolvedValueOnce("Ask AI for a proposal").mockResolvedValueOnce("Edit manually").mockResolvedValueOnce("Save and run");
-    f.editor.mockResolvedValueOnce(JSON.stringify(steps));
+    f.editor.mockResolvedValueOnce(steps);
 
     expect((await f.create())?.state).toBe("active");
 
@@ -235,7 +247,7 @@ describe("reviewing AI postCreate proposals", () => {
   it("does not execute approved edits before final worktree confirmation", async () => {
     const f = await fixture();
     f.select.mockResolvedValueOnce("Ask AI for a proposal").mockResolvedValueOnce("Edit manually").mockResolvedValueOnce("Save and run");
-    f.editor.mockResolvedValueOnce(JSON.stringify(editedSteps));
+    f.editor.mockResolvedValueOnce(editedSteps);
     f.confirm.mockResolvedValueOnce(true).mockResolvedValueOnce(false);
 
     expect(await f.create()).toBeUndefined();

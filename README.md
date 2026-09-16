@@ -163,7 +163,9 @@ Structured argv execution is the default. A step may explicitly set `shell: true
 
 When no `postCreate` hook exists, `/wt new` can ask an isolated pi process for a proposal. The model receives only an allowlist of setup manifests (lockfiles, package manifests, README, Makefile, and language tool files), has no tools, and must return structured argv steps. It cannot inspect `.env` or execute its proposal. You review the exact steps before they are stored in user-local per-repository config and run. Requesting a proposal sends only bounded, redacted excerpts from those allowlisted manifests to your selected model provider.
 
-After generation, choose **Save and run**, **Edit manually**, **Skip once**, or **Cancel**. **Edit manually** opens an editor prefilled with the `postCreate` JSON step array. Edits are validated using the hook configuration rules; invalid drafts stay available for correction. Submitting valid edits returns to the updated review, and cancelling the editor keeps the previous steps. Nothing is saved until you choose **Save and run**, and hooks run only after the final worktree creation confirmation.
+After generation, choose **Save and run**, **Edit manually**, **Skip once**, or **Cancel**. **Edit manually** opens an ordered command list, not JSON. Use ↑/↓ to select a command and Enter to edit its command line; `a` adds a command, `d` or Delete removes it, and Alt+↑/↓ moves it. Ctrl+S or **Done editing** returns to the updated review. Esc discards the current command input; Esc in the list discards the list edits.
+
+Command lines such as `pnpm install --frozen-lockfile` are converted to structured steps automatically. Quote arguments containing spaces. Existing timeouts and environment settings are preserved, and invalid input remains editable. Shell operators and expansions are not enabled implicitly: use separate steps, an explicit `sh -c 'npm install && npm run build'`, or `env NODE_ENV=test npm test` as needed. Nothing is saved until you choose **Save and run**, and hooks run only after the final worktree creation confirmation.
 
 ### Launcher
 
