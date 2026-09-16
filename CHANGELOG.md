@@ -5,6 +5,8 @@ All notable changes to this project are documented here. The project follows
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-09-16
+
 - Let users edit AI-generated `postCreate` steps during `/wt new` using an ordered command-line list with add, delete, and move actions instead of raw JSON. Parse quoted arguments, preserve step settings, and validate edits before review, saving, and execution.
 - Fix registry validation rejecting repository keys containing dots (such as `github.com`), allowing worktree creation and completion history without weakening other identifier checks.
 - Add slash-command, skill, prompt-template, and `@` file completion to the task input in `/wt → new` and `/wt new` without a task.
