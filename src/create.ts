@@ -7,6 +7,7 @@ import {
   loadEffectiveConfig,
   readConfig,
   saveConfig,
+  validateConfig,
 } from "./config.ts";
 import {
   aheadBehind,
@@ -84,6 +85,36 @@ async function rememberSkip(repoKey: string, projectRoot: string, agentDir?: str
   );
 }
 
+async function editPostCreateSteps(
+  ctx: ExtensionCommandContext,
+  steps: HookStep[],
+  zh: boolean,
+): Promise<HookStep[] | undefined> {
+  let draft = JSON.stringify(steps, null, 2);
+  while (true) {
+    const edited = await ctx.ui.editor(
+      zh ? "手动修改 postCreate（JSON 步骤数组）" : "Edit postCreate (JSON step array)",
+      draft,
+    );
+    if (edited === undefined) return undefined;
+    draft = edited;
+    try {
+      if (Buffer.byteLength(edited, "utf8") > 2 * 1024 * 1024) {
+        throw new Error("postCreate exceeds the 2 MiB safety limit");
+      }
+      const parsed: unknown = JSON.parse(edited);
+      if (!Array.isArray(parsed)) throw new Error("postCreate must be a JSON array of hook steps");
+      validateConfig({ version: 1, hooks: { postCreate: parsed } }, "<postCreate>", "repo");
+      return parsed as HookStep[];
+    } catch (error) {
+      ctx.ui.notify(
+        redactSecrets(`${zh ? "postCreate 无效，请修改后重新提交" : "Invalid postCreate; edit and submit again"}: ${error instanceof Error ? error.message : error}`),
+        "error",
+      );
+    }
+  }
+}
+
 async function resolveMissingHook(
   pi: ExtensionAPI,
   ctx: ExtensionCommandContext,
@@ -127,15 +158,28 @@ async function resolveMissingHook(
     if (generated.error) throw generated.error;
     const proposal = generated.value;
     if (!proposal) return undefined;
-    const approved = await ctx.ui.confirm(
-      locale === "zh" ? "AI 初始化建议" : "AI setup proposal",
-      `${proposal.reason}\n\n${hookPlan(proposal.steps)}\n\n${locale === "zh" ? "保存到用户侧 per-repo 配置并执行？" : "Save to user per-repo config and run it?"}`,
-    );
-    if (!approved) return config;
-    await saveRepoPostCreate(repoKey, projectRoot, proposal.steps, agentDir);
+    let steps = proposal.steps;
+    const reviewChoices = locale === "zh"
+      ? ["保存并执行", "手动修改", "仅本次跳过", "取消"]
+      : ["Save and run", "Edit manually", "Skip once", "Cancel"];
+    while (true) {
+      const action = await ctx.ui.select(
+        `${locale === "zh" ? "审阅 postCreate hook" : "Review postCreate hook"}\n\nAI: ${proposal.reason}\n\n${hookPlan(steps)}\n\n${locale === "zh" ? "保存到用户侧 per-repo 配置，并在确认创建 worktree 后执行。" : "Save to user per-repo config and run after confirming worktree creation."}`,
+        reviewChoices,
+      );
+      if (action === reviewChoices[0]) break;
+      if (action === reviewChoices[1]) {
+        const edited = await editPostCreateSteps(ctx, steps, locale === "zh");
+        if (edited !== undefined) steps = edited;
+        continue;
+      }
+      if (action === reviewChoices[2]) return config;
+      return undefined;
+    }
+    await saveRepoPostCreate(repoKey, projectRoot, steps, agentDir);
     const reloaded = await loadEffectiveConfig({ repoKey, projectRoot, projectTrusted: ctx.isProjectTrusted(), agentDir });
-    if (proposal.steps.length > 0 && reloaded.hooks.postCreate.length === 0) {
-      throw new Error("A higher-precedence project configuration overrides the saved AI proposal; edit it explicitly");
+    if (steps.length > 0 && reloaded.hooks.postCreate.length === 0) {
+      throw new Error("A higher-precedence project configuration overrides the saved postCreate hook; edit it explicitly");
     }
     return reloaded;
   }

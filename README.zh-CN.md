@@ -164,6 +164,8 @@ PI_WT_TRANSACTION_ID       # 仅 finish hook
 
 缺少 `postCreate` 时，可以让隔离的 pi 生成建议。模型只能看到安全白名单中的 lockfile、package manifest、README、Makefile 和语言工具配置，没有工具权限，不能查看 `.env`，也不能执行建议。建议必须是结构化 argv；你审阅后才会保存到用户侧 per-repo 配置并运行。请求建议时，仅会把这些白名单 manifest 中经过大小限制和脱敏的摘要发送给你当前选择的模型提供方。
 
+生成后可以选择“保存并执行”“手动修改”“仅本次跳过”或“取消”。选择“手动修改”会打开编辑器，预填 `postCreate` 的 JSON 步骤数组。修改内容按 hook 配置规则校验，格式有误时保留草稿供继续修改；提交有效修改后会重新展示步骤供审阅，取消编辑则保留之前的步骤。只有选择“保存并执行”才会写入配置，hook 则在最终确认创建 worktree 后运行。
+
 ### Launcher
 
 自动模式识别 tmux、Apple Terminal、iTerm2、WezTerm、Kitty、Ghostty、GNOME Terminal 和 Konsole；支持 zsh、bash、fish，最终回退 `/bin/sh`。VS Code/Cursor 集成终端、SSH、WSL GUI 及未知终端使用手动命令。

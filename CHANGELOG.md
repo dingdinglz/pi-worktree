@@ -5,6 +5,7 @@ All notable changes to this project are documented here. The project follows
 
 ## [Unreleased]
 
+- Let users manually edit AI-generated `postCreate` steps during `/wt new`, with validation and an updated review before saving and execution.
 - Fix registry validation rejecting repository keys containing dots (such as `github.com`), allowing worktree creation and completion history without weakening other identifier checks.
 - Add slash-command, skill, prompt-template, and `@` file completion to the task input in `/wt → new` and `/wt new` without a task.
 - Allow `/wt new` from a source checkout with uncommitted changes by default. Create from committed HEAD without copying or changing source edits, and skip source synchronization when it is dirty. Keep `--allow-dirty` as a compatibility no-op.

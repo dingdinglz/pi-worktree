@@ -163,6 +163,8 @@ Structured argv execution is the default. A step may explicitly set `shell: true
 
 When no `postCreate` hook exists, `/wt new` can ask an isolated pi process for a proposal. The model receives only an allowlist of setup manifests (lockfiles, package manifests, README, Makefile, and language tool files), has no tools, and must return structured argv steps. It cannot inspect `.env` or execute its proposal. You review the exact steps before they are stored in user-local per-repository config and run. Requesting a proposal sends only bounded, redacted excerpts from those allowlisted manifests to your selected model provider.
 
+After generation, choose **Save and run**, **Edit manually**, **Skip once**, or **Cancel**. **Edit manually** opens an editor prefilled with the `postCreate` JSON step array. Edits are validated using the hook configuration rules; invalid drafts stay available for correction. Submitting valid edits returns to the updated review, and cancelling the editor keeps the previous steps. Nothing is saved until you choose **Save and run**, and hooks run only after the final worktree creation confirmation.
+
 ### Launcher
 
 Auto mode recognizes tmux, Apple Terminal, iTerm2, WezTerm, Kitty, Ghostty, GNOME Terminal, and Konsole. zsh, bash, fish, and `/bin/sh` fallback are supported. VS Code/Cursor integrated terminals, SSH, WSL GUI launch, and unknown terminals receive a manual command.
