@@ -49,6 +49,7 @@ export interface CreateOptions {
   branch?: string;
   path?: string;
   noLaunch?: boolean;
+  /** @deprecated Source changes are always allowed and left untouched. */
   allowDirty?: boolean;
 }
 
@@ -149,6 +150,15 @@ async function syncSourceForCreate(
 ): Promise<void> {
   const { root, upstream } = repo;
   if (!upstream) return;
+  if (!(await isClean(pi, root))) {
+    ctx.ui.notify(
+      zh
+        ? "来源 checkout 存在未提交修改，跳过同步并使用当前已提交的 HEAD；原有修改保持不变。"
+        : "Source checkout has uncommitted changes; skipping synchronization and using committed local HEAD. Existing changes stay untouched.",
+      "info",
+    );
+    return;
+  }
   const fetch = await git(pi, root, ["fetch", "--", upstream.remote], { timeout: 120_000 });
   if (fetch.code !== 0) {
     ctx.ui.notify(
@@ -330,20 +340,6 @@ export async function createWorktree(
   const originalSourcePath = repo.root;
   const originalCommonDir = repo.commonDir;
   const originalSourceBranch = repo.branch;
-  let dirty = !(await isClean(pi, repo.root));
-  let dirtyTransferWarningApproved = false;
-  if (dirty && !options.allowDirty) throw new Error(`${t("sourceDirty")} Use --allow-dirty to base the new worktree on committed HEAD.`);
-  if (dirty && options.allowDirty) {
-    const approved = await ctx.ui.confirm(
-      t("sourceDirty"),
-      initialZh
-        ? "新 worktree 只包含已提交的 HEAD，不会带入来源 checkout 的未提交修改。继续？"
-        : "The new worktree will include only committed HEAD, not the source checkout's uncommitted changes. Continue?",
-    );
-    if (!approved) return undefined;
-    dirtyTransferWarningApproved = true;
-  }
-
   await withFileLock(registry.sourceLockPath(repo.commonDir, repo.branch), async () => {
     const managedRecords = await registry.records();
     const currentManaged = managedRecords.find((item) => item.path === repo.root);
@@ -367,18 +363,6 @@ export async function createWorktree(
   }
   const synchronizedOperation = await gitOperationInProgress(pi, repo.root);
   if (synchronizedOperation) throw new Error(`Source checkout has a Git operation in progress: ${synchronizedOperation}`);
-  dirty = !(await isClean(pi, repo.root));
-  if (dirty && !options.allowDirty) throw new Error(`${t("sourceDirty")} Use --allow-dirty to continue explicitly.`);
-  if (dirty && options.allowDirty && !dirtyTransferWarningApproved) {
-    const approved = await ctx.ui.confirm(
-      t("sourceDirty"),
-      initialZh
-        ? "同步 hook 使来源 checkout 变为 dirty；这些修改不会带入新 worktree。继续？"
-        : "A synchronization hook made the source checkout dirty. Those changes will not be copied into the new worktree. Continue?",
-    );
-    if (!approved) return undefined;
-    dirtyTransferWarningApproved = true;
-  }
   const task = options.task?.trim() || (await ctx.ui.input(t("taskPrompt"), "Describe the task"))?.trim();
   if (!task) return undefined;
   if (task.length > 500 || /[\u0000-\u001f\u007f-\u009f]/.test(task)) throw new Error("Task description must be a control-free single line of at most 500 characters");
@@ -396,14 +380,15 @@ export async function createWorktree(
   const summary = [
     `${zh ? "来源" : "Source"}: ${repo.root}`,
     `${zh ? "来源分支" : "Source branch"}: ${repo.branch} @ ${repo.head.slice(0, 12)}`,
-    dirty ? (zh ? "警告：来源 checkout 的修改不会复制到新 worktree。" : "WARNING: Source changes are not copied into the new worktree.") : "",
+    zh
+      ? "仅从已提交的 HEAD 创建；来源 checkout 的未提交修改和未跟踪文件保持原样，不会复制到新 worktree。"
+      : "Create from committed HEAD only. Source uncommitted changes and untracked files stay untouched and are not copied into the new worktree.",
     `${zh ? "工作分支" : "Work branch"}: ${names.branch}`,
     `${zh ? "路径" : "Path"}: ${names.path}`,
     `Post-create hooks:\n${hookPlan(config.hooks.postCreate)}`,
     `${zh ? "启动" : "Launch"}: ${launch ? config.launcher.mode : (zh ? "禁用" : "disabled")}`,
   ].filter(Boolean).join("\n\n");
   if (!(await ctx.ui.confirm(t("confirmCreate"), summary))) return undefined;
-  if (dirty) dirtyTransferWarningApproved = true;
 
   const canonicalCwd = await canonicalPath(ctx.cwd);
   const relativeCwd = isPathInside(canonicalCwd, repo.root) ? relative(repo.root, canonicalCwd) : "";
@@ -456,19 +441,6 @@ export async function createWorktree(
       }
       const latestOperation = await gitOperationInProgress(pi, repo.root);
       if (latestOperation) throw new Error(`Source checkout has a Git operation in progress: ${latestOperation}`);
-      const latestClean = await isClean(pi, repo.root);
-      if (!options.allowDirty && !latestClean) {
-        throw new Error("Source checkout became dirty after confirmation");
-      }
-      if (options.allowDirty && !latestClean && !dirtyTransferWarningApproved) {
-        const approved = await ctx.ui.confirm(
-          t("sourceDirty"),
-          initialZh
-            ? "来源 checkout 在最终确认后变为 dirty；这些修改不会带入新 worktree。继续？"
-            : "The source checkout became dirty after final confirmation. Those changes will not be copied. Continue?",
-        );
-        if (!approved) throw new Error(initialZh ? "已取消" : "Cancelled");
-      }
       await assertSafeTarget(pi, repo.root, names.path);
       await gitOk(pi, repo.root, ["worktree", "add", "-b", names.branch, "--", names.path, `refs/heads/${repo.branch}`], "Unable to create worktree");
       created = true;

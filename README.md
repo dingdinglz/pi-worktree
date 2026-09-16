@@ -38,11 +38,13 @@ Requires Node.js 22.19+, a Git implementation with `git worktree`, and pi with t
 
 ## Quick start
 
-From any committed, clean branch checkout:
+From any branch checkout with at least one commit (uncommitted changes are allowed):
 
 ```text
 /wt new implement token refresh
 ```
+
+The new worktree starts from committed HEAD only. Staged changes, unstaged changes, and untracked files stay in the source checkout unchanged; they are not copied. If the source has uncommitted changes, source synchronization is skipped.
 
 The extension creates `wt/implement-token-refresh` under a default path such as:
 
@@ -84,7 +86,7 @@ The selected push remote must have a single push URL pointing to the same reposi
 ## Commands
 
 ```text
-/wt new [task] [--branch <name>] [--path <absolute>] [--no-launch] [--allow-dirty]
+/wt new [task] [--branch <name>] [--path <absolute>] [--no-launch]
 /wt finish <pr|merge> [--resume|--cancel]
 /wt adopt
 /wt reopen [id]
@@ -97,6 +99,7 @@ The selected push remote must have a single push URL pointing to the same reposi
 
 `/worktree` is an alias. Running `/wt` without arguments opens a guided menu. Mutating commands require interactive TUI mode and intentionally have no `--yes` bypass.
 
+- **new** allows uncommitted source changes by default. The legacy `--allow-dirty` flag is still accepted but has no effect.
 - **adopt** records an explicit source checkout for an existing worktree.
 - **reopen** retries initialization for the current `init_failed` worktree, or recreates a deleted PR worktree for review changes.
 - **doctor** checks Git, gh authentication, config, state, and local capabilities.

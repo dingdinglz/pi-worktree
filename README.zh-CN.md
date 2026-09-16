@@ -38,11 +38,13 @@ pi -e ./src/index.ts
 
 ## 快速开始
 
-在已经提交且干净的分支 checkout 中运行：
+在已有至少一次提交的分支 checkout 中运行，允许存在未提交修改：
 
 ```text
 /wt new 实现 token 刷新
 ```
+
+新 worktree 仅基于已提交的 HEAD 创建。已暂存、未暂存的修改和未跟踪文件都保留在来源 checkout 中，不会被复制，也不会被改动。来源有未提交修改时，会跳过来源分支同步。
 
 默认会创建类似下面的位置：
 
@@ -85,7 +87,7 @@ pi -e ./src/index.ts
 ## 命令
 
 ```text
-/wt new [task] [--branch <name>] [--path <absolute>] [--no-launch] [--allow-dirty]
+/wt new [task] [--branch <name>] [--path <absolute>] [--no-launch]
 /wt finish <pr|merge> [--resume|--cancel]
 /wt adopt
 /wt reopen [id]
@@ -98,6 +100,7 @@ pi -e ./src/index.ts
 
 `/worktree` 是同义命令。直接运行 `/wt` 会打开向导。修改状态的命令只能在 TUI 中执行，首版不提供绕过确认的 `--yes`。
 
+- `new`：默认允许来源存在未提交修改；旧的 `--allow-dirty` 参数仍兼容，但已无实际作用。
 - `adopt`：为已有 worktree 明确选择来源目录并写入元数据。
 - `reopen`：为当前 `init_failed` worktree 重试初始化，或在 PR 创建后需要继续修改时从保留分支重建 worktree。
 - `doctor`：检查 Git、gh 登录、配置、状态目录及本机能力。

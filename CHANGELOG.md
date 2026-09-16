@@ -5,6 +5,8 @@ All notable changes to this project are documented here. The project follows
 
 ## [Unreleased]
 
+- Allow `/wt new` from a source checkout with uncommitted changes by default. Create from committed HEAD without copying or changing source edits, and skip source synchronization when it is dirty. Keep `--allow-dirty` as a compatibility no-op.
+
 ## [0.1.1] - 2026-09-07
 
 - First public npm release as `@dinglz/pi-worktree`, with npm installation, update, migration, and publishing instructions in both READMEs.
