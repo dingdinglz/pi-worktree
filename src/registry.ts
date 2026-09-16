@@ -31,6 +31,12 @@ function validIdentifier(value: unknown): value is string {
   return validRequiredString(value) && value.length <= 256 && /^[A-Za-z0-9_-]+$/.test(value);
 }
 
+function validRepoKey(value: unknown): value is string {
+  // Repository keys preserve dots from remote hosts and repository names.
+  return validRequiredString(value) && value.length <= 256 && /^[A-Za-z0-9._-]+$/.test(value) &&
+    value !== "." && value !== "..";
+}
+
 function validIsoDate(value: unknown): value is string {
   if (!validRequiredString(value)) return false;
   const parsed = new Date(value);
@@ -124,7 +130,7 @@ function validateRegistryData(value: unknown, path: string): asserts value is Re
     for (const key of ["id", "repoId", "repoKey", "repoCommonDir", "path", "branch", "sourcePath", "sourceBranch", "sourceHead", "task", "slug", "createdAt", "updatedAt"]) {
       if (!validRequiredString(record[key])) throw new Error(`Invalid worktree record field ${key} in ${path}`);
     }
-    if (!validIdentifier(record.id) || !validIdentifier(record.repoKey) || !validIdentifier(record.slug) ||
+    if (!validIdentifier(record.id) || !validRepoKey(record.repoKey) || !validIdentifier(record.slug) ||
         activeIds.has(String(record.id)) || activePaths.has(String(record.path)) ||
         activeBranches.has(`${record.repoCommonDir}\0${record.branch}`) ||
         String(record.task).length > 500 || /[\u0000-\u001f\u007f-\u009f]/.test(String(record.task)) ||
@@ -227,7 +233,7 @@ function validateRegistryData(value: unknown, path: string): asserts value is Re
     for (const key of ["id", "repoId", "repoKey", "repoCommonDir", "path", "branch", "sourcePath", "sourceBranch", "sourceHead", "finalHead", "task", "slug", "completedAt"]) {
       if (!validRequiredString(record[key])) throw new Error(`Invalid history field ${key} in ${path}`);
     }
-    if (!validIdentifier(record.id) || historyIds.has(String(record.id)) || !validIdentifier(record.repoKey) || !validIdentifier(record.slug) ||
+    if (!validIdentifier(record.id) || historyIds.has(String(record.id)) || !validRepoKey(record.repoKey) || !validIdentifier(record.slug) ||
         String(record.task).length > 500 || /[\u0000-\u001f\u007f-\u009f]/.test(String(record.task)) || !validIsoDate(record.completedAt) ||
         !validBranch(record.branch) || !validBranch(record.sourceBranch) ||
         !validGitOid(record.sourceHead) || !validGitOid(record.finalHead)) {

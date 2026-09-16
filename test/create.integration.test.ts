@@ -299,7 +299,11 @@ describe("managed worktree creation", () => {
     expect(ctx.ui.notify).toHaveBeenCalledWith(expect.stringMatching(/upstream.*local HEAD/i), "warning");
   });
 
-  it("records the exact source path, branch and SHA", async () => {
+  it.each([
+    undefined,
+    "https://github.com/owner/repo.git",
+    "git@git.example.com:some.owner/my.repo.git",
+  ])("records the exact source path, branch and SHA (remote: %s)", async (remote) => {
     const root = await tempDir();
     cleanup.push(root);
     const source = join(root, "a");
@@ -308,7 +312,10 @@ describe("managed worktree creation", () => {
     await writeFile(join(source, "base"), "base\n");
     await run("git", ["add", "."], source);
     await run("git", ["commit", "-qm", "base"], source);
+    // No upstream is configured, so these remote identities never require network access.
+    if (remote) await run("git", ["remote", "add", "origin", remote], source);
     const sourceRepo = await discoverRepo(executor, source);
+    if (remote) expect(sourceRepo.repoKey).toContain(".");
     const registry = new Registry(join(root, "agent"));
     const paths = getConfigPaths(sourceRepo.repoKey, sourceRepo.root, registry.agentDir);
     await saveConfig(paths.repo, { version: 1, defaults: { missingPostCreate: "skip", launch: false } }, "repo");
@@ -324,6 +331,8 @@ describe("managed worktree creation", () => {
     expect(record?.sourcePath).toBe(sourceRepo.root);
     expect(record?.sourceBranch).toBe("develop");
     expect(record?.sourceHead).toBe(sourceRepo.head);
+    expect(record?.repoKey).toBe(sourceRepo.repoKey);
+    expect(record?.repoIdentity).toEqual(sourceRepo.identity);
     expect((await registry.findByPath(target))?.branch).toBe("wt/topic");
     expect(await pathExists(join((await discoverRepo(executor, target)).gitDir, "pi-worktree.json"))).toBe(true);
     expect((await listWorktrees(executor, source)).some((item) => item.branch === "wt/topic")).toBe(true);
