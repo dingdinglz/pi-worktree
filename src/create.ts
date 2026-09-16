@@ -30,7 +30,7 @@ import { createTranslator, resolveLocale } from "./i18n.ts";
 import { buildLaunchPlan, executeLaunchPlan, manualLaunchCommand } from "./launcher.ts";
 import type { EffectiveConfig, HookRunResult, HookStep, ManagedWorktree, RepoInfo, WorktreeConfig } from "./types.ts";
 import type { Registry } from "./registry.ts";
-import { withCancellableLoader } from "./ui.ts";
+import { promptForTask, withCancellableLoader } from "./ui.ts";
 import {
   assertSupportedPlatform,
   canonicalPath,
@@ -363,7 +363,7 @@ export async function createWorktree(
   }
   const synchronizedOperation = await gitOperationInProgress(pi, repo.root);
   if (synchronizedOperation) throw new Error(`Source checkout has a Git operation in progress: ${synchronizedOperation}`);
-  const task = options.task?.trim() || (await ctx.ui.input(t("taskPrompt"), "Describe the task"))?.trim();
+  const task = options.task?.trim() || (await promptForTask(pi, ctx, config.locale))?.trim();
   if (!task) return undefined;
   if (task.length > 500 || /[\u0000-\u001f\u007f-\u009f]/.test(task)) throw new Error("Task description must be a control-free single line of at most 500 characters");
   const initialSlug = slugifyTask(task);

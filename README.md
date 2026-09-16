@@ -99,6 +99,8 @@ The selected push remote must have a single push URL pointing to the same reposi
 
 `/worktree` is an alias. Running `/wt` without arguments opens a guided menu. Mutating commands require interactive TUI mode and intentionally have no `--yes` bypass.
 
+The task input in `/wt → new` (or `/wt new` without a task) supports `/` completion for loaded extension commands, skills, and prompt templates, plus `@` file references relative to the current directory. Use ↑/↓ to select and Tab or Enter to accept a suggestion, then Enter to submit. Esc closes suggestions first, then cancels. Completions insert task text; they do not execute commands in the current session. Tasks remain single-line, up to 500 characters.
+
 - **new** allows uncommitted source changes by default. The legacy `--allow-dirty` flag is still accepted but has no effect.
 - **adopt** records an explicit source checkout for an existing worktree.
 - **reopen** retries initialization for the current `init_failed` worktree, or recreates a deleted PR worktree for review changes.

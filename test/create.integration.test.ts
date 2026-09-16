@@ -5,12 +5,16 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { getConfigPaths, saveConfig } from "../src/config.ts";
 import { createWorktree } from "../src/create.ts";
 import { currentHead, discoverRepo, listWorktrees, statusEntries } from "../src/git.ts";
+import piWorktreeExtension from "../src/index.ts";
 import { Registry } from "../src/registry.ts";
 import { pathExists } from "../src/util.ts";
 import { executor, initRepo, run, tempDir } from "./helpers.ts";
 
 const cleanup: string[] = [];
-afterEach(async () => Promise.all(cleanup.splice(0).map((path) => rm(path, { recursive: true, force: true }))));
+afterEach(async () => {
+  vi.unstubAllEnvs();
+  await Promise.all(cleanup.splice(0).map((path) => rm(path, { recursive: true, force: true })));
+});
 
 function context(cwd: string): ExtensionCommandContext {
   return {
@@ -32,6 +36,72 @@ function context(cwd: string): ExtensionCommandContext {
 }
 
 describe("managed worktree creation", () => {
+  it.each(["", "new", "new explicit task"])("uses the task editor only when needed (/wt %s)", async (args) => {
+    const root = await tempDir();
+    cleanup.push(root);
+    const source = join(root, "source");
+    await initRepo(source);
+    await run("git", ["commit", "--allow-empty", "-qm", "base"], source);
+    vi.stubEnv("PI_CODING_AGENT_DIR", join(root, "agent"));
+    const registry = new Registry();
+    const repo = await discoverRepo(executor, source);
+    await saveConfig(getConfigPaths(repo.repoKey, repo.root, registry.agentDir).repo, {
+      version: 1, locale: "en", worktreeRoot: join(root, "worktrees"),
+      defaults: { missingPostCreate: "skip", launch: false },
+    }, "repo");
+    const ctx = context(source);
+    const task = '/skill:testing fix @"task notes.md"';
+    ctx.ui.custom = vi.fn().mockResolvedValue(`  ${task}  `);
+    ctx.ui.input = vi.fn();
+    ctx.ui.select = vi.fn(async (_title, choices) => choices[0]);
+    ctx.ui.notify = vi.fn();
+    const commands = new Map<string, Parameters<ExtensionAPI["registerCommand"]>[1]>();
+    const pi = {
+      exec: executor.exec.bind(executor),
+      registerCommand: (name: string, command: Parameters<ExtensionAPI["registerCommand"]>[1]) => commands.set(name, command),
+      registerTool: () => {},
+      on: () => {},
+    } as unknown as ExtensionAPI;
+    piWorktreeExtension(pi);
+
+    await commands.get("wt")!.handler(args, ctx);
+
+    const records = await registry.records();
+    expect(records).toHaveLength(1);
+    expect(records[0].state).toBe("active");
+    expect(records[0].task).toBe(args === "new explicit task" ? "explicit task" : task);
+    expect(ctx.ui.custom).toHaveBeenCalledTimes(args === "new explicit task" ? 0 : 1);
+    expect(ctx.ui.select).toHaveBeenCalledTimes(args === "" ? 1 : 0);
+    expect(ctx.ui.input).not.toHaveBeenCalled();
+    expect(ctx.ui.notify).not.toHaveBeenCalledWith(expect.anything(), "error");
+  });
+
+  it.each([
+    { description: "cancelled", task: undefined, invalid: false },
+    { description: "empty", task: "   ", invalid: false },
+    { description: "multiline", task: "first\nsecond", invalid: true },
+    { description: "too long", task: "x".repeat(501), invalid: true },
+  ])("does not create a worktree for a $description task", async ({ task, invalid }) => {
+    const root = await tempDir();
+    cleanup.push(root);
+    const source = join(root, "source");
+    await initRepo(source);
+    await run("git", ["commit", "--allow-empty", "-qm", "base"], source);
+    const registry = new Registry(join(root, "agent"));
+    const ctx = context(source);
+    ctx.ui.custom = vi.fn().mockResolvedValue(task);
+    ctx.ui.confirm = vi.fn();
+    const creating = createWorktree(
+      { exec: executor.exec.bind(executor) } as unknown as ExtensionAPI, registry, ctx,
+      { path: join(root, "target"), noLaunch: true },
+    );
+    if (invalid) await expect(creating).rejects.toThrow("control-free single line of at most 500 characters");
+    else await expect(creating).resolves.toBeUndefined();
+    expect(ctx.ui.confirm).not.toHaveBeenCalled();
+    expect(await registry.records()).toEqual([]);
+    expect(await listWorktrees(executor, source)).toHaveLength(1);
+  });
+
   it.each([
     { timing: "before creation", allowDirty: undefined },
     { timing: "before creation", allowDirty: false },
