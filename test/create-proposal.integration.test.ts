@@ -14,6 +14,7 @@ import type { HookStep } from "../src/types.ts";
 import * as ui from "../src/ui.ts";
 import { pathExists } from "../src/util.ts";
 import { executor, initRepo, run, tempDir } from "./helpers.ts";
+import { setupMessage, setupModel, setupStream } from "./ai-fixtures.ts";
 
 const cleanup: string[] = [];
 beforeEach(() => {
@@ -60,33 +61,23 @@ async function fixture(locale: "en" | "zh-CN" = "en", proposalSteps = generatedS
   const select = vi.fn<ExtensionCommandContext["ui"]["select"]>();
   const editor = vi.spyOn(hookEditor, "editPostCreateSteps");
   const confirm = vi.fn<ExtensionCommandContext["ui"]["confirm"]>().mockResolvedValue(true);
+  const streamSimple = vi.fn<ExtensionCommandContext["modelRegistry"]["streamSimple"]>(() => setupStream(setupMessage({
+    content: [{ type: "text", text: JSON.stringify({ reason: "Set up the fixture", steps: proposalSteps }) }],
+  })));
   const ctx = {
-    cwd: source, mode: "tui", hasUI: true, thinkingLevel: "off",
+    cwd: source, mode: "tui", hasUI: true, thinkingLevel: "off", model: setupModel, modelRegistry: { streamSimple },
     ui: { select, editor: vi.fn(), confirm, custom: vi.fn().mockResolvedValue("topic"), notify: vi.fn() },
     isProjectTrusted: () => false, waitForIdle: async () => {},
   } as unknown as ExtensionCommandContext;
   const commands = new Map<string, Parameters<ExtensionAPI["registerCommand"]>[1]>();
-  const exec = vi.fn<ExtensionAPI["exec"]>(async (command, args, options) => {
-    if (args.includes("--no-tools")) {
-      return {
-        code: 0, stderr: "", killed: false,
-        stdout: JSON.stringify({
-          type: "message_end",
-          message: { role: "assistant", content: [{ type: "text", text: JSON.stringify({
-            reason: "Set up the fixture", steps: proposalSteps,
-          }) }] },
-        }),
-      };
-    }
-    return executor.exec(command, args, options);
-  });
+  const exec = vi.fn<ExtensionAPI["exec"]>((command, args, options) => executor.exec(command, args, options));
   const pi = {
     exec,
     registerCommand: (name: string, command: Parameters<ExtensionAPI["registerCommand"]>[1]) => commands.set(name, command),
     registerTool: () => {}, on: () => {},
   } as unknown as ExtensionAPI;
   return {
-    source, target, registry, configPath, initialConfig, initialText, ctx, pi, exec, select, editor, confirm, commands,
+    source, target, registry, configPath, initialConfig, initialText, ctx, pi, exec, streamSimple, select, editor, confirm, commands,
     create: () => createWorktree(pi, registry, ctx, { task: "topic", path: target, noLaunch: true }),
   };
 }
@@ -125,7 +116,8 @@ describe("reviewing AI postCreate proposals", () => {
     expect(await pathExists(join(records[0].path, "generated.txt"))).toBe(false);
     expect(await pathExists(join(f.source, "edited.txt"))).toBe(false);
     expect(await pathExists(join(f.source, "generated.txt"))).toBe(false);
-    expect(f.exec.mock.calls.filter(([, args]) => args.includes("--no-tools"))).toHaveLength(1);
+    expect(f.streamSimple).toHaveBeenCalledTimes(1);
+    expect(f.exec.mock.calls.every(([command]) => command === "git")).toBe(true);
     expect(f.ctx.ui.notify).not.toHaveBeenCalledWith(expect.anything(), "error");
   });
 

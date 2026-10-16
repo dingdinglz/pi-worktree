@@ -86,7 +86,6 @@ async function rememberSkip(repoKey: string, projectRoot: string, agentDir?: str
 }
 
 async function resolveMissingHook(
-  pi: ExtensionAPI,
   ctx: ExtensionCommandContext,
   repoKey: string,
   projectRoot: string,
@@ -122,7 +121,7 @@ async function resolveMissingHook(
     const generated = await withCancellableLoader(
       ctx,
       locale === "zh" ? "AI 正在分析安全清单…（Esc 取消）" : "AI is inspecting safe manifests… (Esc to cancel)",
-      (signal) => generateSetupProposal(pi, ctx, projectRoot, signal),
+      (signal) => generateSetupProposal(ctx, projectRoot, signal),
     );
     if (generated.aborted) return undefined;
     if (generated.error) throw generated.error;
@@ -384,7 +383,7 @@ export async function createWorktree(
   const namespace = repositoryNamespace(config.worktreeRoot, repo);
   const names = await chooseUniqueNames(pi, ctx, repo.root, config, namespace, initialSlug, options.branch, options.path);
   await assertSafeTarget(pi, repo.root, names.path);
-  const resolvedConfig = await resolveMissingHook(pi, ctx, repo.repoKey, repo.root, config, registry.agentDir);
+  const resolvedConfig = await resolveMissingHook(ctx, repo.repoKey, repo.root, config, registry.agentDir);
   if (!resolvedConfig) return undefined;
   config = resolvedConfig;
   const zh = resolveLocale(config.locale) === "zh-CN";

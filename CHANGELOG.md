@@ -5,6 +5,8 @@ All notable changes to this project are documented here. The project follows
 
 ## [Unreleased]
 
+- Fix AI `postCreate` proposals losing extension providers and custom endpoints: use an isolated, tool-free request through the current Pi runtime, preserving authentication, thinking level, and virtual-model routing without sharing parent history. Keep cancellation, a five-minute deadline, and bounded output; reject incomplete or failed responses. AI setup now requires Pi 1.3.0 or newer; update the dev Pi dependencies to test its host streaming API.
+
 ## [0.1.2] - 2026-09-16
 
 - Let users edit AI-generated `postCreate` steps during `/wt new` using an ordered command-line list with add, delete, and move actions instead of raw JSON. Parse quoted arguments, preserve step settings, and validate edits before review, saving, and execution.

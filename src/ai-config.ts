@@ -1,9 +1,8 @@
 import { constants } from "node:fs";
 import { lstat, open, realpath } from "node:fs/promises";
-import { join, relative, resolve, sep } from "node:path";
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { join, relative, sep } from "node:path";
+import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { validateConfig } from "./config.ts";
-import { getPiInvocation } from "./launcher.ts";
 import type { HookStep, WorktreeConfig } from "./types.ts";
 import { redactSecrets } from "./util.ts";
 
@@ -37,6 +36,9 @@ const ALLOWED_FILES = [
 ];
 const MAX_FILE_BYTES = 24 * 1024;
 const MAX_TOTAL_BYTES = 120 * 1024;
+const MAX_OUTPUT_BYTES = 2 * 1024 * 1024;
+const MAX_OUTPUT_TOKENS = 16 * 1024;
+const REQUEST_TIMEOUT_MS = 5 * 60_000;
 
 export interface SetupProposal {
   reason: string;
@@ -77,27 +79,32 @@ export async function collectSetupManifests(root: string): Promise<string> {
   return sections.join("\n\n");
 }
 
-function assistantTextFromJsonEvents(output: string): string {
-  if (Buffer.byteLength(output, "utf8") > 2 * 1024 * 1024) throw new Error("AI setup process returned oversized output");
-  let final = "";
-  for (const line of output.split("\n")) {
-    if (!line.trim()) continue;
-    try {
-      const event = JSON.parse(line) as {
-        type?: string;
-        message?: { role?: string; content?: Array<{ type?: string; text?: string }> };
-      };
-      if (event.type !== "message_end" || event.message?.role !== "assistant") continue;
-      const text = event.message.content
-        ?.filter((part) => part.type === "text" && typeof part.text === "string")
-        .map((part) => part.text)
-        .join("\n");
-      if (text) final = text;
-    } catch {
-      // Ignore non-event output; stderr is reported separately.
+// Only these locally generated errors may cross the provider boundary verbatim.
+class SetupResponseError extends Error {}
+
+type SetupStream = ReturnType<ExtensionContext["modelRegistry"]["streamSimple"]>;
+
+async function assistantTextFromStream(stream: SetupStream): Promise<string> {
+  for await (const event of stream) {
+    const message = event.type === "done" ? event.message : event.type === "error" ? event.error : event.partial;
+    // Bound the whole response, including reasoning, signatures, and unexpected tool arguments,
+    // while streaming as well as at completion. Never accept just a truncated JSON prefix.
+    if (Buffer.byteLength(JSON.stringify(message), "utf8") > MAX_OUTPUT_BYTES) {
+      throw new SetupResponseError("AI setup request returned oversized output");
     }
+    if (event.type !== "done" && event.type !== "error") continue;
+    if (message.stopReason === "length") throw new SetupResponseError("AI setup response was truncated");
+    if (event.type !== "done" || event.reason !== "stop" || message.stopReason !== "stop") {
+      throw new SetupResponseError("AI setup request did not complete successfully");
+    }
+    if (message.content.some((part) => part.type === "toolCall")) {
+      throw new SetupResponseError("AI setup response unexpectedly requested a tool");
+    }
+    const text = message.content.filter((part) => part.type === "text").map((part) => part.text).join("\n");
+    if (!text) throw new SetupResponseError("AI setup request returned no assistant JSON");
+    return text;
   }
-  return final;
+  throw new SetupResponseError("AI setup request ended without a complete response");
 }
 
 function parseProposal(text: string): SetupProposal {
@@ -131,11 +138,16 @@ function parseProposal(text: string): SetupProposal {
 }
 
 export async function generateSetupProposal(
-  pi: ExtensionAPI,
   ctx: ExtensionContext,
   root: string,
   signal?: AbortSignal,
 ): Promise<SetupProposal> {
+  const model = ctx.model;
+  if (!model) throw new Error("AI setup requires a selected model");
+  if (typeof ctx.modelRegistry.streamSimple !== "function") {
+    throw new Error("AI setup requires modelRegistry.streamSimple; update Pi to 1.3.0 or newer");
+  }
+  if (signal?.aborted) throw new Error("AI setup request cancelled");
   const manifests = await collectSetupManifests(root);
   if (!manifests) throw new Error("No safe setup manifests were found for AI inspection");
   const prompt = [
@@ -148,27 +160,50 @@ export async function generateSetupProposal(
     "",
     manifests,
   ].join("\n");
-  const args = [
-    "--mode",
-    "json",
-    "-p",
-    "--no-session",
-    "--no-tools",
-    "--no-extensions",
-    "--no-skills",
-    "--no-prompt-templates",
-    "--no-context-files",
-  ];
-  if (ctx.model) args.push("--model", `${ctx.model.provider}/${ctx.model.id}`);
-  if (ctx.thinkingLevel) args.push("--thinking", ctx.thinkingLevel);
-  args.push("--", prompt);
-  const invocation = getPiInvocation(args);
-  const result = await pi.exec(invocation.command, invocation.args, { cwd: resolve(root), timeout: 5 * 60_000, signal });
-  if (result.code !== 0) {
-    const stderr = result.stderr.slice(-64 * 1024);
-    throw new Error(redactSecrets(stderr.trim()) || `AI setup process exited with ${result.code}`);
+  const controller = new AbortController();
+  const cancel = () => controller.abort();
+  let timedOut = false;
+  const timeout = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, REQUEST_TIMEOUT_MS);
+  signal?.addEventListener("abort", cancel, { once: true });
+  let onAbort!: () => void;
+  const aborted = new Promise<never>((_resolve, reject) => {
+    onAbort = () => reject(new Error("AI setup request aborted"));
+    controller.signal.addEventListener("abort", onAbort, { once: true });
+  });
+  let stream: SetupStream | undefined;
+  let text: string;
+  try {
+    // Also enforce a deadline when a provider fails to finish or ignores cancellation.
+    text = await Promise.race([(async () => {
+      // Cancellation may have arrived while reading manifests. Do not dispatch in that case.
+      if (signal?.aborted) cancel();
+      controller.signal.throwIfAborted();
+      // Use the selected object and host facade, not a provider/id reconstruction or standalone
+      // pi-ai client: the runtime owns extension providers, authentication, endpoints, and routing.
+      stream = ctx.modelRegistry.streamSimple(model, {
+        messages: [{ role: "user", content: prompt, timestamp: Date.now() }],
+      }, {
+        reasoning: ctx.thinkingLevel === "off" ? undefined : ctx.thinkingLevel,
+        maxTokens: model.maxTokens > 0 ? Math.min(model.maxTokens, MAX_OUTPUT_TOKENS) : MAX_OUTPUT_TOKENS,
+        signal: controller.signal,
+      });
+      return assistantTextFromStream(stream);
+    })(), aborted]);
+    controller.signal.throwIfAborted();
+  } catch (error) {
+    if (controller.signal.aborted) throw new Error(timedOut ? "AI setup request timed out" : "AI setup request cancelled");
+    if (error instanceof SetupResponseError) throw error;
+    // Provider/auth errors can contain arbitrary credentials or request payloads.
+    throw new Error("AI setup request failed");
+  } finally {
+    clearTimeout(timeout);
+    signal?.removeEventListener("abort", cancel);
+    controller.signal.removeEventListener("abort", onAbort);
+    controller.abort();
+    stream?.end();
   }
-  const text = assistantTextFromJsonEvents(result.stdout);
-  if (!text) throw new Error("AI setup process returned no assistant JSON");
   return parseProposal(text);
 }
