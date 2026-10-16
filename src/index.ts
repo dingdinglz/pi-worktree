@@ -71,7 +71,7 @@ export default function piWorktreeExtension(pi: ExtensionAPI) {
     name: FINALIZE_TOOL,
     label: "Finalize Worktree PR",
     description:
-      "Verify the pushed branch and PR for an explicitly approved pi-worktree transaction, then offer safe cleanup. It is locked unless worktree_prepare authorized publication.",
+      "Verify the pushed branch and PR for an explicitly approved pi-worktree transaction, retaining the worktree for further work. Use /wt cleanup separately to remove it. It is locked unless worktree_prepare authorized publication.",
     parameters: Type.Object({
       transactionId: Type.String({ description: "Exact transaction id returned by worktree_prepare" }),
       prUrl: Type.Optional(Type.String({ description: "Created or reopened pull request URL" })),
@@ -87,6 +87,7 @@ export default function piWorktreeExtension(pi: ExtensionAPI) {
     const items = [
       ["new", "create a managed worktree", "创建受管理的 worktree"],
       ["finish", "PR or merge the current worktree", "创建 PR 或合并当前 worktree"],
+      ["cleanup", "remove the current finished worktree", "删除当前已完成的 worktree"],
       ["adopt", "attach metadata to the current worktree", "接管当前 worktree"],
       ["reopen", "restore a PR worktree", "恢复 PR worktree"],
       ["list", "list managed worktrees", "列出受管理的 worktree"],
@@ -134,6 +135,14 @@ export default function piWorktreeExtension(pi: ExtensionAPI) {
           return;
         }
         await finish.start(ctx, mode, flagBoolean(parsed, "resume"));
+        return;
+      }
+
+      if (subcommand === "cleanup") {
+        const parsed = parseArgs(rest);
+        assertAllowedFlags(parsed, new Set());
+        requireNoPositionals(parsed.positional, "/wt cleanup");
+        await finish.cleanupCurrent(ctx);
         return;
       }
 
@@ -196,7 +205,7 @@ export default function piWorktreeExtension(pi: ExtensionAPI) {
   }
 
   const completions = (prefix: string) => {
-    const commands = ["new", "finish pr", "finish merge", "adopt", "reopen", "list", "status", "config", "doctor", "prune"];
+    const commands = ["new", "finish pr", "finish merge", "cleanup", "adopt", "reopen", "list", "status", "config", "doctor", "prune"];
     const matching = commands.filter((command) => command.startsWith(prefix));
     return matching.length ? matching.map((value) => ({ value, label: value })) : null;
   };
@@ -240,11 +249,18 @@ export default function piWorktreeExtension(pi: ExtensionAPI) {
         agentDir: registry.agentDir,
       });
       const zh = resolveLocale(config.locale) === "zh-CN";
-      const warning = Boolean(record.transaction) || ["creating", "init_failed", "finish_paused", "cleanup_pending", "cleanup_scheduled", "merged_cleanup_pending"].includes(record.state);
+      const completed = record.transaction?.phase === "awaiting_cleanup";
+      const warning = (!completed && Boolean(record.transaction)) || ["creating", "init_failed", "finish_paused", "cleanup_scheduled"].includes(record.state);
       const status = `wt: ${record.branch} ← ${record.sourceBranch}${warning ? ` [${record.state}]` : ""}`;
       ctx.ui.setStatus("pi-worktree", warning ? ctx.ui.theme.fg("warning", status) : ctx.ui.theme.fg("accent", status));
-      if (warning) {
-        const recovery = record.transaction
+      if (completed) {
+        ctx.ui.notify(zh
+          ? "上轮 finish 已完成，worktree 已保留。继续修改后运行 /wt finish，或用 /wt cleanup 清理。"
+          : "Previous finish completed; worktree retained. Run /wt finish after further changes, or /wt cleanup to remove it.", "info");
+      } else if (warning) {
+        const recovery = record.state === "cleanup_scheduled"
+          ? "/wt cleanup"
+          : record.transaction
           ? `/wt finish ${record.transaction.mode} --resume`
           : record.state === "init_failed"
             ? "/wt reopen"

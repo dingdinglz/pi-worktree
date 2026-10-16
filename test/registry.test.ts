@@ -186,6 +186,33 @@ describe("registry", () => {
     await expect(registry.beginFinishTransaction(item.id, transaction)).resolves.toMatchObject({ state: "finish_active" });
   });
 
+  it("replaces only the exact completed receipt and rejects concurrent finish or cleanup", async () => {
+    const root = await tempDir();
+    cleanup.push(root);
+    const registry = new Registry(root);
+    const item = record(`${root}/retained`);
+    const timestamp = new Date().toISOString();
+    const completed = {
+      id: "completed", sessionId: "old-session", mode: "merge" as const, phase: "awaiting_cleanup" as const,
+      sourceHead: item.sourceHead, workHead: item.sourceHead, mergedHead: item.sourceHead,
+      cleanupResult: "merged" as const, startedAt: timestamp, updatedAt: timestamp,
+    };
+    await registry.add({ ...item, state: "merged_cleanup_pending", transaction: completed });
+    const next = {
+      id: "next", sessionId: "new-session", mode: "merge" as const, phase: "agent_prepare" as const,
+      sourceHead: item.sourceHead, startedAt: timestamp, updatedAt: timestamp,
+    };
+    await expect(registry.beginFinishTransaction(item.id, next)).rejects.toThrow(/transaction/i);
+    await expect(registry.beginFinishTransaction(item.id, next, "wrong-receipt")).rejects.toThrow(/transaction/i);
+    await expect(registry.beginFinishTransaction(item.id, next, completed.id)).resolves.toMatchObject({ state: "finish_active" });
+    await expect(registry.beginFinishTransaction(item.id, { ...next, id: "concurrent" }, completed.id)).rejects.toThrow(/transaction/i);
+    await registry.update(item.id, (record) => {
+      record.state = "cleanup_scheduled";
+      record.transaction = { ...completed, phase: "cleanup_scheduled", cleanupAttemptId: "attempt" };
+    });
+    await expect(registry.beginFinishTransaction(item.id, next, completed.id)).rejects.toThrow(/transaction/i);
+  });
+
   it("atomically rejects two active finish transactions for the same source branch", async () => {
     const root = await tempDir();
     cleanup.push(root);

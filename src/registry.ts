@@ -359,13 +359,16 @@ export class Registry {
     });
   }
 
-  async beginFinishTransaction(id: string, transaction: FinishTransaction): Promise<ManagedWorktree> {
+  async beginFinishTransaction(id: string, transaction: FinishTransaction, completedTransactionId?: string): Promise<ManagedWorktree> {
     return this.mutate((data) => {
       const record = data.worktrees.find((item) => item.id === id);
       if (!record) throw new Error(`Managed worktree not found: ${id}`);
       const existing = record.transaction;
-      if (existing && (existing.id !== transaction.id || (existing.sessionId !== undefined && existing.sessionId !== transaction.sessionId) ||
-          existing.mode !== transaction.mode || !["agent_prepare", "publish_authorized"].includes(existing.phase))) {
+      const replacingCompleted = completedTransactionId !== undefined && existing?.id === completedTransactionId &&
+        existing.phase === "awaiting_cleanup";
+      if ((completedTransactionId !== undefined && !replacingCompleted) ||
+          (existing && !replacingCompleted && (existing.id !== transaction.id || (existing.sessionId !== undefined && existing.sessionId !== transaction.sessionId) ||
+          existing.mode !== transaction.mode || !["agent_prepare", "publish_authorized"].includes(existing.phase)))) {
         throw new Error("Finish transaction changed before it could be started; resume or cancel the current transaction explicitly");
       }
       const protectedBranches = new Set([record.sourceBranch, record.branch]);

@@ -2,6 +2,7 @@ import { rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import * as cleanupModule from "../src/cleanup.ts";
 import { getConfigPaths, saveConfig } from "../src/config.ts";
 import { FinishCoordinator } from "../src/finish.ts";
 import { currentHead, discoverRepo, gitOk, isClean, remoteBranchSha } from "../src/git.ts";
@@ -11,7 +12,10 @@ import { newId, nowIso } from "../src/util.ts";
 import { executor, initRepo, run, tempDir } from "./helpers.ts";
 
 const cleanup: string[] = [];
-afterEach(async () => Promise.all(cleanup.splice(0).map((path) => rm(path, { recursive: true, force: true }))));
+afterEach(async () => {
+  vi.restoreAllMocks();
+  await Promise.all(cleanup.splice(0).map((path) => rm(path, { recursive: true, force: true })));
+});
 
 function fakePi(): ExtensionAPI {
   return { exec: executor.exec.bind(executor), sendUserMessage: vi.fn() } as unknown as ExtensionAPI;
@@ -94,7 +98,7 @@ async function conflictedRebaseFixture() {
   return data;
 }
 
-async function prFixture() {
+async function prFixture(prState: "OPEN" | "MERGED" = "OPEN") {
   const data = await fixture();
   const remote = join(data.root, "remote.git");
   await run("git", ["init", "-q", "--bare", remote]);
@@ -109,31 +113,36 @@ async function prFixture() {
     };
   });
   const pi = {
+    sendUserMessage: vi.fn(),
     async exec(command: string, args: string[], options?: Parameters<ExtensionAPI["exec"]>[2]) {
       if (command === "git" && args[0] === "remote" && args[1] === "get-url") {
         return { stdout: "https://github.com/owner/repo.git\n", stderr: "", code: 0, killed: false };
       }
       if (command === "gh") {
-        if (args[0] !== "pr" || args[1] !== "view") throw new Error(`Unexpected gh command: ${args.join(" ")}`);
+        if (args[0] === "--version" || args[0] === "auth") return { stdout: "", stderr: "", code: 0, killed: false };
+        if (args[0] !== "pr" || !["view", "list"].includes(args[1])) throw new Error(`Unexpected gh command: ${args.join(" ")}`);
+        const info = {
+          url: "https://github.com/owner/repo/pull/1", state: prState, title: "Topic", body: "Body", isDraft: false,
+          headRefName: "wt/topic", baseRefName: "develop", headRefOid: await remoteBranchSha(executor, data.target, "origin", "wt/topic"),
+          headRepository: { nameWithOwner: "owner/repo" },
+        };
         return {
-          stdout: JSON.stringify({
-            url: "https://github.com/owner/repo/pull/1", state: "OPEN", title: "Topic", body: "Body", isDraft: false,
-            headRefName: "wt/topic", baseRefName: "develop", headRefOid: await currentHead(executor, data.target),
-            headRepository: { nameWithOwner: "owner/repo" },
-          }),
+          stdout: JSON.stringify(args[1] === "list" ? [info] : info),
           stderr: "", code: 0, killed: false,
         };
       }
       return executor.exec(command, args, options);
     },
-  } as ExtensionAPI;
+  } as unknown as ExtensionAPI;
   return { ...data, pi };
 }
 
 describe("PR publication authorization", () => {
   it("prepares, pushes and verifies a PR using only local Git and fake gh", async () => {
     const data = await prFixture();
-    const ctx = fakeContext(data.target, [true, true, false]);
+    const ctx = fakeContext(data.target, [true, true]);
+    ctx.ui.confirm = vi.fn(ctx.ui.confirm);
+    ctx.shutdown = vi.fn();
     const coordinator = new FinishCoordinator(data.pi, data.registry, { activate() {}, deactivate() {} });
     const prepared = await coordinator.prepare(
       { transactionId: data.transactionId, title: "Topic", body: "Body", draft: false }, undefined, ctx,
@@ -145,6 +154,74 @@ describe("PR publication authorization", () => {
       { transactionId: data.transactionId, prUrl: "https://github.com/owner/repo/pull/1" }, ctx,
     )).resolves.toContain("Pull request verified");
     expect((await data.registry.findById(data.record.id))?.state).toBe("cleanup_pending");
+    expect(ctx.ui.confirm).toHaveBeenCalledTimes(2);
+    expect(ctx.shutdown).not.toHaveBeenCalled();
+    const schedule = vi.spyOn(cleanupModule, "scheduleCleanup").mockResolvedValue(undefined);
+    await coordinator.cleanupCurrent(fakeContext(data.target, [true]));
+    expect(schedule).toHaveBeenCalledWith(data.registry, expect.objectContaining({
+      result: "pr", deleteBranch: false, prUrl: "https://github.com/owner/repo/pull/1",
+    }));
+  });
+
+  it.each([false, true])("retains an already-merged PR without scheduling cleanup (resume: %s)", async (resume) => {
+    const data = await prFixture("MERGED");
+    const coordinator = new FinishCoordinator(data.pi, data.registry, { activate() {}, deactivate() {} });
+    const prepared = await coordinator.prepare(
+      { transactionId: data.transactionId, title: "Topic", body: "Body" }, undefined, fakeContext(data.target, [true, true]),
+    );
+    await run("/bin/sh", ["-c", prepared.split("\n\n").find((part) => part.startsWith("GIT_TERMINAL_PROMPT=0"))!], data.target);
+    if (!resume) await data.registry.update(data.record.id, (record) => {
+      record.state = "active";
+      record.transaction = undefined;
+    });
+    const ctx = fakeContext(data.target, [true]);
+    ctx.ui.confirm = vi.fn(ctx.ui.confirm);
+    ctx.shutdown = vi.fn();
+    await coordinator.start(ctx, "pr", resume);
+    expect(ctx.ui.confirm).toHaveBeenCalledTimes(1);
+    expect(ctx.shutdown).not.toHaveBeenCalled();
+    expect((await data.registry.findById(data.record.id))?.transaction?.cleanupResult).toBe("already_integrated");
+  });
+
+  it.each(["committed", "uncommitted"])("starts another PR round after %s review changes and reuses the open PR", async (changes) => {
+    const data = await prFixture();
+    const coordinator = new FinishCoordinator(data.pi, data.registry, { activate() {}, deactivate() {} });
+    const ctx = fakeContext(data.target, [true, true]);
+    const prepared = await coordinator.prepare(
+      { transactionId: data.transactionId, title: "Topic", body: "Body" }, undefined, ctx,
+    );
+    await run("/bin/sh", ["-c", prepared.split("\n\n").find((part) => part.startsWith("GIT_TERMINAL_PROMPT=0"))!], data.target);
+    await coordinator.finalize({ transactionId: data.transactionId }, ctx);
+    const previousHead = await currentHead(executor, data.target);
+    await writeFile(join(data.target, "review"), "review fix\n");
+    if (changes === "committed") {
+      await run("git", ["add", "review"], data.target);
+      await run("git", ["commit", "-qm", "review fix"], data.target);
+    }
+    const nextCtx = fakeContext(data.target, [true], "review-session");
+    nextCtx.ui.select = async (_title, choices) => choices[0];
+    await coordinator.start(nextCtx, "pr");
+    const next = (await data.registry.findById(data.record.id))!.transaction!;
+    expect(next.id).not.toBe(data.transactionId);
+    expect(next.sessionId).toBe("review-session");
+    expect(next.phase).toBe("agent_prepare");
+    expect(next.workHead).toBeUndefined();
+    expect(next.pr?.existingUrl).toBe("https://github.com/owner/repo/pull/1");
+    expect(data.pi.sendUserMessage).toHaveBeenCalledWith(expect.stringContaining("Do not push yet"));
+    // Starting the next round must not publish new work using the old authorization.
+    expect(await remoteBranchSha(executor, data.target, "origin", "wt/topic")).toBe(previousHead);
+    if (changes === "uncommitted") {
+      await run("git", ["add", "review"], data.target);
+      await run("git", ["commit", "-qm", "review fix"], data.target);
+    }
+    const nextPrepared = await coordinator.prepare(
+      { transactionId: next.id, title: "Topic", body: "Body" }, undefined, fakeContext(data.target, [true, true], "review-session"),
+    );
+    expect(nextPrepared).not.toContain("'gh' 'pr' 'create'");
+    expect(nextPrepared).toContain("'gh' 'pr' 'edit'");
+    await run("/bin/sh", ["-c", nextPrepared.split("\n\n").find((part) => part.startsWith("GIT_TERMINAL_PROMPT=0"))!], data.target);
+    await coordinator.finalize({ transactionId: next.id }, nextCtx);
+    expect((await data.registry.findById(data.record.id))?.transaction?.workHead).toBe(await currentHead(executor, data.target));
   });
 
   it("pins the approved push SHA even when HEAD moves before the command executes", async () => {
@@ -213,17 +290,113 @@ describe("PR publication authorization", () => {
   });
 });
 
+describe("Explicit cleanup and repeated finish", () => {
+  async function finishedMerge() {
+    const data = await fixture();
+    const pi = fakePi();
+    const coordinator = new FinishCoordinator(pi, data.registry, { activate() {}, deactivate() {} });
+    await coordinator.prepare({ transactionId: data.transactionId }, undefined, fakeContext(data.target, [true, true]));
+    return { ...data, pi, coordinator };
+  }
+
+  it("only schedules deletion via explicit cleanup and confirmation", async () => {
+    const data = await finishedMerge();
+    const schedule = vi.spyOn(cleanupModule, "scheduleCleanup").mockResolvedValue(undefined);
+    const ctx = fakeContext(data.target, [false, true]);
+    ctx.shutdown = vi.fn();
+    await data.coordinator.cleanupCurrent(ctx);
+    expect(schedule).not.toHaveBeenCalled();
+    expect(ctx.shutdown).not.toHaveBeenCalled();
+    await data.coordinator.cleanupCurrent(ctx);
+    expect(schedule).toHaveBeenCalledWith(data.registry, expect.objectContaining({
+      expectedWorkHead: await currentHead(executor, data.target), result: "merged", deleteBranch: true,
+    }));
+    expect(ctx.shutdown).toHaveBeenCalledOnce();
+  });
+
+  it.each(["committed", "untracked", "tracked"])("blocks cleanup with %s review changes", async (changes) => {
+    const data = await finishedMerge();
+    const schedule = vi.spyOn(cleanupModule, "scheduleCleanup").mockResolvedValue(undefined);
+    if (changes === "committed") await run("git", ["commit", "--allow-empty", "-qm", "new work"], data.target);
+    else await writeFile(join(data.target, changes === "tracked" ? "feature" : "new-file"), "unfinished\n");
+    const ctx = fakeContext(data.target, [true]);
+    ctx.shutdown = vi.fn();
+    await expect(data.coordinator.cleanupCurrent(ctx)).rejects.toThrow(changes === "committed" ? /HEAD changed.*\/wt finish/ : /Git status entries/);
+    expect(schedule).not.toHaveBeenCalled();
+    expect(ctx.shutdown).not.toHaveBeenCalled();
+  });
+
+  it("requires a completed finish and interactive mode for cleanup", async () => {
+    const data = await fixture();
+    const coordinator = new FinishCoordinator(fakePi(), data.registry, { activate() {}, deactivate() {} });
+    const ctx = fakeContext(data.target, [true]);
+    await expect(coordinator.cleanupCurrent(ctx)).rejects.toThrow(/Run \/wt finish first/);
+    await expect(coordinator.cleanupCurrent({ ...ctx, mode: "rpc" })).rejects.toThrow(/interactive TUI/);
+  });
+
+  it("starts a fresh merge transaction after more work, but preserves the receipt when cancelled", async () => {
+    const data = await finishedMerge();
+    const before = (await data.registry.findById(data.record.id))!.transaction!;
+    await run("git", ["commit", "--allow-empty", "-qm", "review fix"], data.target);
+    await data.coordinator.start(fakeContext(data.target, [false]), "merge");
+    expect((await data.registry.findById(data.record.id))?.transaction).toEqual(before);
+    await data.coordinator.start(fakeContext(data.target, [true]), "merge");
+    const next = (await data.registry.findById(data.record.id))!.transaction!;
+    expect(next.id).not.toBe(before.id);
+    expect(next.phase).toBe("agent_prepare");
+    await expect(data.coordinator.prepare({ transactionId: before.id }, undefined, fakeContext(data.target, [true])))
+      .rejects.toThrow(/No matching/);
+    await data.coordinator.prepare({ transactionId: next.id }, undefined, fakeContext(data.target, [true, true]));
+    expect(await currentHead(executor, data.source)).toBe(await currentHead(executor, data.target));
+  });
+
+  it("does not overwrite cleanup scheduled while confirming an already-integrated finish", async () => {
+    const data = await finishedMerge();
+    const ctx = fakeContext(data.target, []);
+    ctx.ui.confirm = async () => {
+      await data.registry.update(data.record.id, (record) => {
+        record.state = "cleanup_scheduled";
+        record.transaction!.phase = "cleanup_scheduled";
+        record.transaction!.cleanupAttemptId = "concurrent-cleanup";
+      });
+      return true;
+    };
+    await expect(data.coordinator.start(ctx, "merge")).rejects.toThrow(/transaction changed before completion/);
+    expect((await data.registry.findById(data.record.id))?.transaction?.cleanupAttemptId).toBe("concurrent-cleanup");
+  });
+
+  it("guides completed --resume to a new finish or explicit cleanup", async () => {
+    const data = await finishedMerge();
+    await expect(data.coordinator.start(fakeContext(data.target, []), "merge", true)).rejects.toThrow(/Finish already completed/);
+  });
+
+  it("retries scheduled cleanup through cleanup, never through finish", async () => {
+    const data = await finishedMerge();
+    await data.registry.update(data.record.id, (record) => {
+      record.state = "cleanup_scheduled";
+      record.transaction!.phase = "cleanup_scheduled";
+      record.transaction!.cleanupAttemptId = "old-attempt";
+    });
+    await expect(data.coordinator.start(fakeContext(data.target, []), "merge", true)).rejects.toThrow(/Use \/wt cleanup/);
+    await data.coordinator.cleanupCurrent(fakeContext(data.target, [true, false]));
+    const record = await data.registry.findById(data.record.id);
+    expect(record?.state).toBe("merged_cleanup_pending");
+    expect(record?.transaction?.cleanupAttemptId).toBeUndefined();
+  });
+});
+
 describe("FinishCoordinator local merge", () => {
-  it("updates the exact source checkout and leaves cleanup pending when deletion is declined", async () => {
+  it("updates the exact source checkout and retains the worktree without asking to delete it", async () => {
     const data = await fixture();
     const pi = fakePi();
     const coordinator = new FinishCoordinator(pi, data.registry, { activate() {}, deactivate() {} });
     const workHead = await currentHead(executor, data.target);
-    const result = await coordinator.prepare(
-      { transactionId: data.transactionId },
-      undefined,
-      fakeContext(data.target, [true, true, false]),
-    );
+    const ctx = fakeContext(data.target, [true, true]);
+    ctx.ui.confirm = vi.fn(ctx.ui.confirm);
+    ctx.shutdown = vi.fn();
+    const result = await coordinator.prepare({ transactionId: data.transactionId }, undefined, ctx);
+    expect(ctx.ui.confirm).toHaveBeenCalledTimes(2);
+    expect(ctx.shutdown).not.toHaveBeenCalled();
     expect(result).toContain("Merged wt/topic");
     expect(await currentHead(executor, data.source)).toBe(workHead);
     expect((await data.registry.findById(data.record.id))?.state).toBe("merged_cleanup_pending");
@@ -243,7 +416,7 @@ describe("FinishCoordinator local merge", () => {
     expect(record?.prUrl).toBeUndefined();
   });
 
-  it("can clean up an already-integrated worktree with an old PR URL", async () => {
+  it("retains an already-integrated worktree and clears its old PR URL", async () => {
     const data = await fixture();
     await run("git", ["merge", "--ff-only", "wt/topic"], data.source);
     await data.registry.update(data.record.id, (record) => {

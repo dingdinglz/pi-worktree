@@ -69,7 +69,7 @@ pi -e ./src/index.ts
 3. `worktree_prepare` 运行质量门禁，并展示 commits、PR title/body/draft。
 4. 你批准后，agent 才使用明确的 push 和非交互 `gh pr create` 命令。Push 固定到已审核的提交 SHA，不会随之后的 `HEAD` 变化而发布其他提交。
 5. `worktree_finalize` 验证远端 SHA、head/base、title/body 和 draft 状态。
-6. 最后确认后，当前 pi 退出，独立 helper 删除 worktree。本地和远端 PR 分支保留。
+6. Finish 完成后保留 worktree 和当前 pi 会话。收到 review 意见后可继续修改，再次运行 `/wt finish pr`；原 PR 仍打开时会更新它，并重新运行质量门禁和发布授权。
 
 ### 合并回来源目录
 
@@ -78,17 +78,24 @@ pi -e ./src/index.ts
 1. agent commit 并 rebase 到 `a/develop` 的最新 SHA。
 2. 质量门禁通过后，extension 回到目录 `a` 执行 `git merge --ff-only <工作分支>`。
 3. extension 不会自动 push `develop`。
-4. 最终确认后删除 worktree，并用安全的 `git branch -d` 删除已经合入的本地工作分支。
+4. Finish 完成后保留 worktree，可继续工作并再次运行 `/wt finish merge`。
 
 如果来源分支在过程中变化，流程会停止并要求重新 rebase，不会偷偷制造 merge commit。Rebase 中断后可使用 `/wt finish <pr|merge> --resume` 继续处理。
 
 选定的 push remote 必须只有一个 push URL，且与 fetch URL 指向同一仓库。如果 fork 的推送目标不同，请为其配置独立 remote；发布前会拒绝不匹配或多个推送目标。
+
+### 显式清理
+
+不再需要当前 worktree 时，运行 `/wt cleanup`。它只清理已有成功 finish 记录的当前受管理 worktree，不会丢弃未完成的工作。确认后，当前 pi 退出，由独立 helper 删除目录。PR 模式保留本地和远端分支；本地 merge 模式还会用 `git branch -d` 删除已合入的本地工作分支。
+
+清理仍要求 HEAD 与上轮 finish 核验的提交一致、没有未提交或未跟踪文件，并通过来源 checkout、submodule 和依赖检查。有新增修改时，请先再次 `/wt finish`。`finish` 不再自动询问删除；`--resume` 只恢复未完成的发布/合并，已安排的清理通过 `/wt cleanup` 重试。旧版本留下的 `cleanup_pending` 状态也可以直接开始下一轮 finish，无需先 `--cancel`。
 
 ## 命令
 
 ```text
 /wt new [task] [--branch <name>] [--path <absolute>] [--no-launch]
 /wt finish <pr|merge> [--resume|--cancel]
+/wt cleanup
 /wt adopt
 /wt reopen [id]
 /wt list [--all]
@@ -103,6 +110,7 @@ pi -e ./src/index.ts
 `/wt → new`（或不带任务描述的 `/wt new`）中的任务输入支持 `/` 补全已加载的扩展命令、技能和 prompt 模板，以及相对当前目录的 `@` 文件引用。用 ↑/↓ 选择，Tab 或 Enter 接受候选，再按 Enter 提交。Esc 先关闭补全列表，再按一次取消。补全只插入任务文本，不会在当前会话执行命令。任务描述仍须为单行，最多 500 字符。
 
 - `new`：默认允许来源存在未提交修改；旧的 `--allow-dirty` 参数仍兼容，但已无实际作用。
+- `cleanup`：显式确认并安全删除当前已完成的 worktree；不提供强删选项。
 - `adopt`：为已有 worktree 明确选择来源目录并写入元数据。
 - `reopen`：为当前 `init_failed` worktree 重试初始化，或在 PR 创建后需要继续修改时从保留分支重建 worktree。
 - `doctor`：检查 Git、gh 登录、配置、状态目录及本机能力。

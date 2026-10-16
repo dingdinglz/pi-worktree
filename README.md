@@ -69,7 +69,7 @@ When the task is ready, from the managed worktree:
 3. `worktree_prepare` runs configured quality gates and asks you to approve commits and PR content.
 4. The agent uses explicit, approved push and `gh pr create` commands. Pushes are pinned to the reviewed commit SHA, not a potentially changed `HEAD`.
 5. `worktree_finalize` verifies the remote SHA, head/base refs, title/body, and draft state.
-6. After a final confirmation, pi exits and a helper removes the worktree. The local and remote PR branches remain.
+6. Finish retains the worktree and current pi session. Address review feedback and run `/wt finish pr` again to update the existing open PR, with fresh quality gates and publication approval.
 
 ### Local merge finish
 
@@ -77,17 +77,24 @@ When the task is ready, from the managed worktree:
 2. Quality gates run.
 3. After approval, the extension executes `git merge --ff-only` in the **original source checkout and branch**.
 4. It never pushes the source branch automatically.
-5. After confirmation, the worktree is removed and the integrated local work branch is deleted with `git branch -d`.
+5. Finish retains the worktree. Continue working and run `/wt finish merge` again when ready.
 
 If the source branch changes during the workflow, publication/integration stops and the agent must rebase again. No merge commit is silently introduced. An interrupted rebase can be continued with `/wt finish <pr|merge> --resume`.
 
 The selected push remote must have a single push URL pointing to the same repository as its fetch URL. For forks with a different destination, configure a separate remote; mismatched or multiple push destinations are rejected before publication.
+
+### Explicit cleanup
+
+Run `/wt cleanup` inside the managed worktree when you no longer need it. Cleanup requires a successful finish record; it does not discard unfinished work. After confirmation, pi exits and a helper removes the directory. PR cleanup retains local and remote branches; local-merge cleanup also deletes the integrated local branch with `git branch -d`.
+
+Cleanup still requires HEAD to match the last verified finish, no uncommitted or untracked files, and successful source-checkout, submodule, and dependency checks. Run `/wt finish` again if you have made further changes. Finish no longer offers deletion automatically. `--resume` only resumes unfinished publication/integration; retry scheduled cleanup with `/wt cleanup`. Older `cleanup_pending` records can also start a new finish round without `--cancel`.
 
 ## Commands
 
 ```text
 /wt new [task] [--branch <name>] [--path <absolute>] [--no-launch]
 /wt finish <pr|merge> [--resume|--cancel]
+/wt cleanup
 /wt adopt
 /wt reopen [id]
 /wt list [--all]
@@ -102,6 +109,7 @@ The selected push remote must have a single push URL pointing to the same reposi
 The task input in `/wt → new` (or `/wt new` without a task) supports `/` completion for loaded extension commands, skills, and prompt templates, plus `@` file references relative to the current directory. Use ↑/↓ to select and Tab or Enter to accept a suggestion, then Enter to submit. Esc closes suggestions first, then cancels. Completions insert task text; they do not execute commands in the current session. Tasks remain single-line, up to 500 characters.
 
 - **new** allows uncommitted source changes by default. The legacy `--allow-dirty` flag is still accepted but has no effect.
+- **cleanup** explicitly confirms and safely removes the current finished worktree; no force option is provided.
 - **adopt** records an explicit source checkout for an existing worktree.
 - **reopen** retries initialization for the current `init_failed` worktree, or recreates a deleted PR worktree for review changes.
 - **doctor** checks Git, gh authentication, config, state, and local capabilities.

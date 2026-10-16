@@ -241,7 +241,7 @@ export class FinishCoordinator {
     await strictSource(this.pi, record);
     const cleanupHead = await strictTarget(this.pi, record);
     if (!record.transaction?.workHead || cleanupHead !== record.transaction.workHead) {
-      throw new Error("Managed worktree HEAD changed after finish authorization");
+      throw new Error("Managed worktree HEAD changed after finish authorization; run /wt finish again to publish or merge the new work before /wt cleanup");
     }
     const entries = await statusEntries(this.pi, record.path);
     if (entries.length > 0) {
@@ -332,14 +332,73 @@ export class FinishCoordinator {
     ctx.ui.notify("Finish transaction cancelled. Git commits and remote state were left untouched.", "info");
   }
 
+  private assertCompletionSnapshot(current: ManagedWorktree, expected: ManagedWorktree): void {
+    if (current.state !== expected.state || current.transaction?.id !== expected.transaction?.id ||
+        current.transaction?.phase !== expected.transaction?.phase ||
+        current.transaction?.sessionId !== expected.transaction?.sessionId) {
+      throw new Error("Finish transaction changed before completion; run /wt status again");
+    }
+  }
+
+  private notifyRetained(ctx: ExtensionContext): void {
+    this.tools.deactivate();
+    const zh = resolveLocale("auto") === "zh-CN";
+    ctx.ui.notify(
+      zh
+        ? "Finish 已完成，worktree 已保留。可继续修改并再次 /wt finish；不再需要时运行 /wt cleanup。"
+        : "Finish completed; worktree retained. Continue working and run /wt finish again, or run /wt cleanup when done.",
+      "info",
+    );
+  }
+
+  async cleanupCurrent(ctx: ExtensionCommandContext): Promise<void> {
+    if (ctx.mode !== "tui") throw new Error("Cleanup requires interactive TUI mode");
+    assertSupportedPlatform();
+    await ctx.waitForIdle();
+    let record = await this.recordForContext(ctx);
+    if (record.state === "cleanup_scheduled") {
+      const approved = await ctx.ui.confirm(
+        "Retry scheduled cleanup?",
+        "This marks any previous cleanup helper stale and starts a newly confirmed cleanup attempt.",
+      );
+      if (!approved) return;
+      record = await withFileLock(
+        this.registry.sourceLockPath(record.repoCommonDir, record.sourceBranch),
+        async () => this.registry.update(record.id, (item) => {
+          if (!item.transaction || item.transaction.id !== record.transaction?.id || item.state !== "cleanup_scheduled" ||
+              item.transaction.cleanupAttemptId !== record.transaction?.cleanupAttemptId) {
+            throw new Error("Scheduled cleanup changed before takeover; run /wt status again");
+          }
+          item.state = item.transaction.cleanupResult === "merged" ? "merged_cleanup_pending" : "cleanup_pending";
+          item.transaction.phase = "awaiting_cleanup";
+          item.transaction.cleanupAttemptId = undefined;
+          item.transaction.updatedAt = nowIso();
+        }),
+      );
+    }
+    if (!record.transaction || record.transaction.phase !== "awaiting_cleanup" ||
+        !["cleanup_pending", "merged_cleanup_pending"].includes(record.state)) {
+      throw new Error("No completed finish is available for cleanup. Run /wt finish first; cleanup does not discard unfinished work.");
+    }
+    const result = record.transaction.cleanupResult!;
+    const finalHead = record.transaction.mergedHead ?? record.transaction.workHead!;
+    await this.cleanup(ctx, record, result, finalHead, record.prUrl);
+  }
+
   async start(ctx: ExtensionCommandContext, requestedMode?: FinishMode, resume = false): Promise<void> {
     if (ctx.mode !== "tui") throw new Error("This operation is available only in interactive TUI mode");
     assertSupportedPlatform();
     await ctx.waitForIdle();
     let record = await this.recordForContext(ctx);
     if (record.state === "creating") throw new Error("Worktree creation/adoption is incomplete; recover it with /wt prune and /wt reopen before finishing");
-    const existing = record.transaction;
-    let mode = requestedMode ?? existing?.mode;
+    if (record.state === "cleanup_scheduled") {
+      throw new Error("Cleanup is already scheduled. Use /wt cleanup to retry, or /wt finish --cancel before continuing work.");
+    }
+    // A completed finish is a cleanup receipt, not a transaction to resume.
+    // Keep it until the next finish is confirmed so cancelling a dialog is harmless.
+    const completed = record.transaction?.phase === "awaiting_cleanup" ? record.transaction : undefined;
+    const existing = completed ? undefined : record.transaction;
+    let mode = requestedMode ?? existing?.mode ?? completed?.mode;
     if (!mode) {
       const zh = resolveLocale("auto") === "zh-CN";
       const choices = zh ? ["创建 Pull Request", "本地合并", "取消"] : ["Create a pull request", "Merge locally", "Cancel"];
@@ -348,10 +407,12 @@ export class FinishCoordinator {
       mode = selected === choices[0] ? "pr" : "merge";
     }
 
-    if (existing && !resume && record.state !== "cleanup_pending" && record.state !== "merged_cleanup_pending") {
+    if (existing && !resume) {
       throw new Error(`A ${existing.mode} transaction is already ${record.state}. Use /wt finish ${existing.mode} --resume or --cancel.`);
     }
-    if (resume && !existing) throw new Error("There is no paused transaction to resume");
+    if (resume && !existing) throw new Error(completed
+      ? "Finish already completed. Use /wt finish for another round, or /wt cleanup to remove the worktree."
+      : "There is no paused transaction to resume");
     if (existing && existing.mode !== mode) throw new Error(`The existing transaction mode is ${existing.mode}, not ${mode}`);
     const currentSessionId = ctx.sessionManager.getSessionId();
     if (existing && existing.sessionId !== currentSessionId &&
@@ -375,40 +436,6 @@ export class FinishCoordinator {
         item.state = "finish_paused";
       });
       existing.sessionId = currentSessionId;
-    }
-
-    if (record.state === "cleanup_scheduled") {
-      const takeover = await ctx.ui.confirm(
-        "Retry scheduled cleanup?",
-        "This marks any previous cleanup helper stale and starts a newly confirmed cleanup attempt.",
-      );
-      if (!takeover) return;
-      record = await withFileLock(
-        this.registry.sourceLockPath(record.repoCommonDir, record.sourceBranch),
-        async () => {
-          const fresh = await this.registry.findById(record.id);
-          if (!fresh?.transaction || fresh.transaction.id !== existing?.id || fresh.state !== "cleanup_scheduled") {
-            throw new Error("Scheduled cleanup changed before takeover; run /wt status again");
-          }
-          return this.registry.update(record.id, (item) => {
-            item.state = item.transaction?.cleanupResult === "merged" ? "merged_cleanup_pending" : "cleanup_pending";
-            if (item.transaction) {
-              item.transaction.phase = "awaiting_cleanup";
-              item.transaction.cleanupAttemptId = undefined;
-              item.transaction.updatedAt = nowIso();
-            }
-          });
-        },
-      );
-    }
-
-    if (record.state === "cleanup_pending" || record.state === "merged_cleanup_pending") {
-      const result: WorktreeHistoryEntry["result"] = record.transaction?.cleanupResult ?? (
-        record.state === "merged_cleanup_pending" ? "merged" : record.prUrl ? "pr" : "already_integrated"
-      );
-      const finalHead = record.transaction?.mergedHead ?? record.transaction?.workHead ?? (await currentHead(this.pi, record.path));
-      await this.cleanup(ctx, record, result, finalHead, record.prUrl);
-      return;
     }
 
     const config = await loadEffectiveConfig({
@@ -466,10 +493,11 @@ export class FinishCoordinator {
         }
         const clean = await ctx.ui.confirm(
           zh ? "恢复到已合并的 PR" : "Recovered a merged PR",
-          `${recoveredMerged.url}\n\n${zh ? "清理此 worktree？" : "Clean up this worktree?"}`,
+          `${recoveredMerged.url}\n\n${zh ? "将本轮 finish 标记为完成并保留 worktree？" : "Mark this finish complete and retain the worktree?"}`,
         );
         if (!clean) return;
         await this.registry.update(record.id, (item) => {
+          this.assertCompletionSnapshot(item, record);
           item.prUrl = recoveredMerged.url;
           item.state = "cleanup_pending";
           if (item.transaction) {
@@ -480,7 +508,7 @@ export class FinishCoordinator {
           }
         });
         record = (await this.registry.findById(record.id))!;
-        await this.cleanup(ctx, record, "already_integrated", targetHead, recoveredMerged.url);
+        this.notifyRetained(ctx);
         return;
       }
       if (recoveredOpen) {
@@ -531,12 +559,13 @@ export class FinishCoordinator {
       const approved = await ctx.ui.confirm(
         zh ? "工作内容已集成" : "Work is already integrated",
         zh
-          ? `工作分支已包含在 ${record.sourceBranch} 中。不再 merge 或创建 PR，直接清理 worktree？`
-          : `The work branch is already contained in ${record.sourceBranch}. Clean up the worktree without another merge or PR?`,
+          ? `工作分支已包含在 ${record.sourceBranch} 中。不再 merge 或创建 PR，将本轮 finish 标记为完成并保留 worktree？`
+          : `The work branch is already contained in ${record.sourceBranch}. Mark this finish complete and retain the worktree without another merge or PR?`,
       );
       if (!approved) return;
       const timestamp = nowIso();
       await this.registry.update(record.id, (item) => {
+        this.assertCompletionSnapshot(item, record);
         item.state = "cleanup_pending";
         // This result is verified by local ancestry, not by a historical PR.
         item.prUrl = undefined;
@@ -553,7 +582,7 @@ export class FinishCoordinator {
         };
       });
       record = (await this.registry.findById(record.id))!;
-      await this.cleanup(ctx, record, "already_integrated", sourceHead);
+      this.notifyRetained(ctx);
       return;
     }
 
@@ -591,11 +620,12 @@ export class FinishCoordinator {
         }
         const approved = await ctx.ui.confirm(
           zh ? "Pull Request 已合并" : "Pull request is already merged",
-          `${merged.url}\n\n${zh ? "清理此 worktree？" : "Clean up this worktree?"}`,
+          `${merged.url}\n\n${zh ? "将本轮 finish 标记为完成并保留 worktree？" : "Mark this finish complete and retain the worktree?"}`,
         );
         if (!approved) return;
         const timestamp = nowIso();
         await this.registry.update(record.id, (item) => {
+          this.assertCompletionSnapshot(item, record);
           item.prUrl = merged.url;
           item.state = "cleanup_pending";
           item.transaction = {
@@ -610,7 +640,7 @@ export class FinishCoordinator {
           };
         });
         record = (await this.registry.findById(record.id))!;
-        await this.cleanup(ctx, record, "already_integrated", targetHead, merged.url);
+        this.notifyRetained(ctx);
         return;
       } else if (closed) {
         const closedChoices = zh ? ["重新打开", "创建新的 PR", "取消"] : ["Reopen", "Create a new PR", "Cancel"];
@@ -679,8 +709,9 @@ export class FinishCoordinator {
         startedAt: existing?.startedAt ?? timestamp,
         updatedAt: timestamp,
         pr,
-      });
+      }, completed?.id);
     });
+    if (completed?.pr?.bodyFile) await this.registry.removePrBody(completed.pr.bodyFile);
     this.tools.activate();
     this.pi.sendUserMessage(finishPrompt(record, mode, sourceHead, transactionId));
   }
@@ -799,7 +830,7 @@ export class FinishCoordinator {
       record = (await this.registry.findById(record.id))!;
       ctx.ui.notify("The work branch was fast-forwarded into its recorded source checkout.", "info");
       signal?.throwIfAborted();
-      await this.cleanup(ctx, record, "merged", mergedHead);
+      this.notifyRetained(ctx);
       return `Merged ${record.branch} into ${record.sourcePath}:${record.sourceBranch} at ${mergedHead}.`;
     }
 
@@ -963,7 +994,7 @@ export class FinishCoordinator {
     });
     record = (await this.registry.findById(record.id))!;
     ctx.ui.notify(`Pull request verified: ${info.url}`, "info");
-    await this.cleanup(ctx, record, "pr", workHead, info.url);
+    this.notifyRetained(ctx);
     return `Pull request verified: ${info.url}`;
   }
 
